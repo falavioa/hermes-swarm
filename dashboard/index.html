@@ -161,6 +161,7 @@ body {
     </div>
     <div style="display:flex;align-items:center;gap:12px">
         <select id="team-select" onchange="changeTeam(this.value)"><option value="">Loading teams...</option></select>
+        <button class="btn btn-sm btn-secondary" onclick="showAddTeam()">+ New Team</button>
         <div class="ws-status disconnected" id="ws-status"><span class="ws-dot"></span><span id="ws-text">Disconnected</span></div>
     </div>
 </div>
@@ -181,7 +182,6 @@ body {
             <div class="network-container"><div class="network-title">Live Network</div><svg id="network-svg" viewBox="0 0 580 300"></svg></div>
             <div style="display:flex;gap:8px;margin-bottom:10px">
                 <button class="btn btn-sm btn-secondary" style="flex:1" onclick="showLinkEditor()">🔗 Edit Links</button>
-                <button class="btn btn-sm btn-secondary" style="flex:1" onclick="showAddTeam()">+ New Team</button>
             </div>
             <div class="queue-viz"><div style="display:flex;justify-content:space-between;margin-bottom:8px;"><span class="controls-title" style="margin:0">Task Queues</span><span style="font-size:10px;color:var(--text-muted)" id="sweep-timer">Next sweep in 10s</span></div><div class="queue-bars" id="queue-bars"></div></div>
         </div>
@@ -190,17 +190,13 @@ body {
         <div class="panel-header"><span id="msg-header">Messages</span><span style="font-size:10px;color:var(--text-muted)" id="msg-count">0</span></div>
         <div class="panel-body" id="message-list" style="flex:1;overflow-y:auto"><div class="empty-state"><div class="empty-state-icon">💬</div><div>Select an agent</div></div></div>
         <div class="controls-section">
-            <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Manual Controls</div>
+            <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Send Task</div>
             <div class="control-group">
-                <span class="control-label">From</span>
-                <select class="control-select" id="ctrl-source" onchange="updateTarget()"></select>
-            </div>
-            <div class="control-group">
-                <span class="control-label">To</span>
+                <span class="control-label">Target Agent</span>
                 <select class="control-select" id="ctrl-target"></select>
             </div>
-            <div style="margin-bottom:6px"><textarea class="control-textarea" id="ctrl-payload" placeholder="Message or task..."></textarea></div>
-            <button class="btn" onclick="sendTask()">Send Task</button>
+            <div style="margin-bottom:6px"><textarea class="control-textarea" id="ctrl-payload" placeholder="What should this agent do?" style="min-height:60px"></textarea></div>
+            <button class="btn" onclick="sendTask()">Send</button>
             <div style="margin-top:5px;display:flex;gap:5px"><button class="btn btn-secondary" style="flex:1" onclick="refreshData()">Refresh</button><button class="btn btn-secondary" style="flex:1" onclick="clearLog()">Clear</button></div>
         </div>
     </div>
@@ -289,10 +285,21 @@ function handleWS(msg) {
     const { type, payload } = msg;
     switch (type) {
         case 'state_snapshot': agentData = payload.agents || {}; renderAgents(); renderNetwork(); renderQueues(); updateStats(); updateTarget(); updateSweepTimer(); break;
-        case 'state_change': if (agentData[payload.agent_name]) { agentData[payload.agent_name].state = payload.state; if (payload.next_sweep_at) agentData[payload.agent_name].next_sweep_at = payload.next_sweep_at; } renderAgents(); renderNetwork(); updateStats(); logEvent('state_change', `${payload.agent_name} → ${payload.state}`); updateSweepTimer(); break;
+        case 'state_change': 
+            if (agentData[payload.agent_name]) { 
+                agentData[payload.agent_name].state = payload.state; 
+                if (payload.next_sweep_at) agentData[payload.agent_name].next_sweep_at = payload.next_sweep_at; 
+            } else {
+                agentData[payload.agent_name] = { state: payload.state, pending_count: 0, next_sweep_at: payload.next_sweep_at, config: {} };
+            }
+            renderAgents(); renderNetwork(); renderQueues(); updateStats(); updateSweepTimer();
+            logEvent('state_change', `${payload.agent_name} → ${payload.state}`);
+            break;
         case 'task_enqueued': case 'queue_updated':
             if (agentData[payload.agent_name]) agentData[payload.agent_name].pending_count = payload.pending_count;
-            renderAgents(); renderQueues(); updateStats(); if (type === 'task_enqueued') logEvent('task_enqueued', `${payload.from_agent || 'unknown'} → ${payload.agent_name}`); break;
+            renderAgents(); renderQueues(); updateStats(); updateTarget();
+            if (type === 'task_enqueued') logEvent('task_enqueued', `${payload.from_agent || 'unknown'} → ${payload.agent_name}`);
+            break;
         case 'task_dequeued': logEvent('task_dequeued', `${payload.agent_name} processing ${payload.count}`); renderQueues(); break;
         case 'message_sent': logEvent('message_sent', `${payload.from_agent} → ${payload.to_agent}`); animateParticle(payload.from_agent, payload.to_agent); break;
         case 'conversation_start': logEvent('conversation_start', `${payload.agent_name} processing from ${payload.from_agent}`); break;
@@ -336,16 +343,23 @@ function renderNetwork() {
     const w = 580, h = 300, cx = w/2, cy = h/2, r = Math.min(w,h)/2 - 50;
     const pos = {};
     names.forEach((n, i) => { const a = (i/names.length)*2*Math.PI - Math.PI/2; pos[n] = {x: cx+r*Math.cos(a), y: cy+r*Math.sin(a)}; });
-    let html = '';
-    // Draw explicit links only
+    
+    let defs = `<defs><marker id="arrow" markerWidth="6" markerHeight="6" refX="24" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#58a6ff"/></marker></defs>`;
+    let html = defs;
+    
+    // Draw explicit directed links (arrow from source to target)
+    const drawn = new Set();
     for (let i=0;i<names.length;i++) {
         for (let j=0;j<names.length;j++) {
             if (i === j) continue;
             const a = names[i], b = names[j];
             const aPeers = agentData[a]?.config?.allowed_peers || [];
             if (aPeers.includes(b)) {
+                const key = a + '->' + b;
+                if (drawn.has(key)) continue;
+                drawn.add(key);
                 const pa = pos[a], pb = pos[b];
-                html += `<line class="conn" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="#30363d" stroke-width="1.5" data-from="${a}" data-to="${b}"/>`;
+                html += `<line class="conn" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" stroke="#58a6ff" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#arrow)" data-from="${a}" data-to="${b}"/>`;
             }
         }
     }
@@ -358,13 +372,13 @@ function renderNetwork() {
             <text x="${p.x}" y="${p.y+54}" text-anchor="middle" fill="#8b949e" font-size="10">Q:${agentData[n]?.pending_count||0}</text></g>`;
     });
     svg.innerHTML = html;
-    document.getElementById('net-info').textContent = `${names.length} agents`;
+    document.getElementById('net-info').textContent = `${names.length} agents · ${drawn.size} links`;
 }
 
 function animateParticle(fromAgent, toAgent) {
     const svg = document.getElementById('network-svg');
     const line = svg.querySelector(`line[data-from="${fromAgent}"][data-to="${toAgent}"]`);
-    if (!line) return; // no link = no particle
+    if (!line) return;
     const x1 = +line.getAttribute('x1'), y1 = +line.getAttribute('y1');
     const x2 = +line.getAttribute('x2'), y2 = +line.getAttribute('y2');
     const p = document.createElementNS('http://www.w3.org/2000/svg','circle');
@@ -377,8 +391,8 @@ function animateParticle(fromAgent, toAgent) {
         if (k<1) requestAnimationFrame(step); else p.remove();
     }
     requestAnimationFrame(step);
-    line.setAttribute('stroke','#58a6ff'); line.setAttribute('stroke-width','2.5');
-    setTimeout(() => { line.setAttribute('stroke','#30363d'); line.setAttribute('stroke-width','1.5'); }, 800);
+    line.setAttribute('stroke-opacity','1'); line.setAttribute('stroke-width','2.5');
+    setTimeout(() => { line.setAttribute('stroke-opacity','0.4'); line.setAttribute('stroke-width','1.5'); }, 800);
 }
 
 function renderQueues() {
@@ -505,37 +519,21 @@ function selectAgent(name) {
 }
 
 function updateTarget() {
-    const src = document.getElementById('ctrl-source').value;
     const tgt = document.getElementById('ctrl-target');
     const names = Object.keys(agentData).sort();
-    // Populate source
-    const srcSel = document.getElementById('ctrl-source');
-    if (!srcSel.children.length) {
-        srcSel.innerHTML = names.map(n => `<option value="${n}">${esc(agentData[n]?.config?.name || n)}</option>`).join('');
-    }
-    // Populate target: only linked agents of the source
-    const sourceName = srcSel.value;
-    const peers = agentData[sourceName]?.config?.allowed_peers || [];
-    tgt.innerHTML = '';
-    if (!peers.length) {
-        tgt.innerHTML = '<option value="">No linked agents</option>';
-        return;
-    }
-    peers.forEach(p => {
-        if (agentData[p]) {
-            const opt = document.createElement('option');
-            opt.value = p;
-            opt.textContent = agentData[p]?.config?.name || p;
-            tgt.appendChild(opt);
-        }
-    });
+    tgt.innerHTML = names.map(n => `<option value="${n}">${esc(agentData[n]?.config?.name || n)}</option>`).join('');
 }
 
 async function refreshData() {
     try {
-        const res = await fetch(`${API_URL}/monitoring/agents${currentTeam ? '?team_id='+currentTeam : ''}`);
+        const url = currentTeam ? `${API_URL}/monitoring/agents?team_id=${encodeURIComponent(currentTeam)}` : `${API_URL}/monitoring/agents`;
+        const res = await fetch(url);
         const data = await res.json();
-        if (data.agents) { Object.assign(agentData, data.agents); renderAgents(); renderNetwork(); renderQueues(); updateStats(); updateTarget(); updateSweepTimer(); }
+        if (data.agents) {
+            // Full replace, not merge — so deleted agents disappear
+            agentData = data.agents;
+            renderAgents(); renderNetwork(); renderQueues(); updateStats(); updateTarget(); updateSweepTimer();
+        }
     } catch (e) { console.error(e); }
 }
 
@@ -646,7 +644,12 @@ async function removeAgent(name) {
         const data = await res.json();
         if (data.error) { logEvent('error', data.error); return; }
         logEvent('system', `Agent deleted: ${name}`);
-        if (selectedAgent === name) selectedAgent = null;
+        if (selectedAgent === name) {
+            selectedAgent = null;
+            document.getElementById('message-list').innerHTML = '<div class="empty-state"><div class="empty-state-icon">💬</div><div>Select an agent</div></div>';
+            document.getElementById('msg-header').textContent = 'Messages';
+            document.getElementById('msg-count').textContent = '0';
+        }
         delete agentData[name];
         renderAgents(); renderNetwork(); renderQueues(); updateTarget();
         loadTeams();

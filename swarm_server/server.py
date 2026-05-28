@@ -348,9 +348,7 @@ async def monitoring_agents(team_id: str = None):
             "state": d.state,
             "pending_count": d.queue.get_pending_count(),
             "next_sweep_at": d.next_sweep_at,
-            "team_id": d.cfg.get("team_id"),
-            "session_id": d.cfg.get("session_id"),
-            "soul_preview": d.cfg.get("soul", "")[:200],
+            "config": d.cfg,
             "allowed_peers": d.cfg.get("allowed_peers", []),
         }
     return JSONResponse({
