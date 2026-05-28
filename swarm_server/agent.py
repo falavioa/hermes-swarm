@@ -14,6 +14,7 @@ from swarm_server.config import (
     SWEEP_INTERVAL_SECONDS,
     _derive_workspace_path,
     compose_agent_soul,
+    load_agents_config,
 )
 from swarm_server.monitoring import monitor_db
 from swarm_server.queue import TaskQueue
@@ -66,6 +67,11 @@ class AgentDaemon:
 
                 os.environ["HERMES_HOME"] = str(self._hermes_home)
 
+                # Prepare config with agent_id for soul composition
+                soul_cfg = dict(self.cfg)
+                soul_cfg["agent_id"] = self.name
+                full_cfg = load_agents_config()
+
                 self._ai_agent = AIAgent(
                     base_url=LITELLM_API_BASE,
                     api_key="sk-1234",
@@ -74,7 +80,7 @@ class AgentDaemon:
                     skip_memory=False,
                     skip_context_files=False,
                     quiet_mode=True,
-                    ephemeral_system_prompt=compose_agent_soul(self.cfg),
+                    ephemeral_system_prompt=compose_agent_soul(soul_cfg, full_cfg),
                 )
                 _register_custom_tools()
 
@@ -89,6 +95,11 @@ class AgentDaemon:
                     self._ai_agent.tools = list(self._ai_agent.tools or [])
                     self._ai_agent.tools.append(_ASK_HUMAN_TOOL_SCHEMA)
                     self._ai_agent.valid_tool_names.add("ask_human")
+                if "log_changes" not in existing_names:
+                    from swarm_server.tools import _LOG_CHANGES_TOOL_SCHEMA
+                    self._ai_agent.tools = list(self._ai_agent.tools or [])
+                    self._ai_agent.tools.append(_LOG_CHANGES_TOOL_SCHEMA)
+                    self._ai_agent.valid_tool_names.add("log_changes")
 
                 # Eagerly init session DB while HERMES_HOME is locked to this agent
                 try:

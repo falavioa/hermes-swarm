@@ -49,6 +49,28 @@ _ASK_HUMAN_TOOL_SCHEMA = {
     },
 }
 
+_LOG_CHANGES_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "log_changes",
+        "description": (
+            "Log an important event, status update, or completed task to the shared team activity log. "
+            "Use this after completing work, making decisions, or when something notable happens. "
+            "This helps the whole team stay informed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entry": {
+                    "type": "string",
+                    "description": "The log entry text. Be concise but informative.",
+                },
+            },
+            "required": ["entry"],
+        },
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Tool Handlers
@@ -169,6 +191,56 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, "response": daemon.human_response})
 
 
+def _log_changes_handler(args: dict, **kwargs) -> str:
+    import time
+    from datetime import datetime
+
+    entry = args.get("entry", "")
+    task_id_arg = kwargs.get("task_id", "")
+    caller = "unknown"
+    if task_id_arg and task_id_arg.startswith("agent_name:"):
+        caller = task_id_arg.split(":", 1)[1]
+
+    if not entry.strip():
+        return json.dumps({"success": False, "error": "Empty log entry."})
+
+    # Get team_id from config
+    from swarm_server.config import load_agents_config, _get_team_workspace_path
+
+    cfg = load_agents_config()
+    caller_cfg = cfg["agents"].get(caller, {})
+    team_id = caller_cfg.get("team_id", "default")
+
+    # Append to team agent_log.md
+    team_ws = _get_team_workspace_path(team_id)
+    agent_log = team_ws / "agent_log.md"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"# [{timestamp}] {caller}: {entry}\n\n"
+
+    try:
+        if agent_log.exists():
+            with open(agent_log, "a", encoding="utf-8") as f:
+                f.write(log_line)
+        else:
+            with open(agent_log, "w", encoding="utf-8") as f:
+                f.write("# Team Activity Log\n\n")
+                f.write(log_line)
+        log.info("[log_changes] %s logged: %s", caller, entry[:80])
+    except Exception as e:
+        log.warning("[log_changes] Failed to write log for %s: %s", caller, e)
+        return json.dumps({"success": False, "error": f"Failed to write log: {e}"})
+
+    # Also log to monitoring
+    monitor_db.log_event(caller, "agent_log", data={"entry": entry})
+    _broadcast("log_changes", {
+        "agent_name": caller,
+        "entry": entry,
+        "timestamp": time.time(),
+    })
+
+    return json.dumps({"success": True, "message": "Log entry recorded."})
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -197,5 +269,14 @@ def _register_custom_tools():
                 description="Ask a human for clarification.",
             )
             log.info("[ask_human] Registered")
+        if "log_changes" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="log_changes",
+                toolset="custom",
+                schema=_LOG_CHANGES_TOOL_SCHEMA["function"],
+                handler=_log_changes_handler,
+                description="Log important events to the shared team activity log.",
+            )
+            log.info("[log_changes] Registered")
     except Exception as exc:
         log.warning("[Custom Tools] Could not register in Hermes registry: %s", exc)

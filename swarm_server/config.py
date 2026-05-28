@@ -30,27 +30,51 @@ SWEEP_INTERVAL_SECONDS = 10
 
 # ---------------------------------------------------------------------------
 # Common SOUL — shared by all agents in the framework
-# Injected at runtime with: {agent_name}, {team_id}, {allowed_peers_list}
+# Injected at runtime with: {agent_name}, {team_id}, {allowed_peers_list},
+# {workspace_path}, {org_diagram}, {all_team_members}
 # ---------------------------------------------------------------------------
 COMMON_SOUL_TEMPLATE = (
-    "You are an autonomous agent in a multi-agent swarm.\n"
+    "You are an autonomous agent in a multi-agent swarm working on a shared project.\n"
     "You operate within an async system: tasks arrive in batches and are processed "
     "every ~{sweep_interval}s. Responses are not immediate.\n\n"
     "--- SWARM RULES ---\n"
     "1. NEVER end your turn silently. Always conclude by calling a tool.\n"
-    "   - Use 'send_peer_message' to send results, delegate tasks, or chat with peers.\n"
+    "   - Prefer 'send_peer_message' to delegate work and keep your context short.\n"
     "   - Use 'ask_human' only when genuinely stuck, instructions are ambiguous, "
     "     or a task requires human judgment (approvals, subjective choices).\n"
+    "   - Use 'log_changes' after completing tasks or when something important happens.\n"
     "2. After calling 'send_peer_message' or 'ask_human', STOP calling tools and end your turn.\n"
     "3. Process tasks autonomously without asking for permission.\n"
     "4. Report completions, blockers, or delegation decisions back to the sender.\n"
-    "5. Keep responses concise — other agents read them in batch.\n\n"
+    "5. Prefer DELEGATING tasks to other agents over doing everything yourself.\n"
+    "   Offload work to keep your context window short and focused.\n"
+    "6. Keep responses concise — other agents read them in batch.\n\n"
+    "--- WORKSPACE RULES ---\n"
+    "Your dedicated workspace: {workspace_path}\n"
+    "You may ONLY read/write files within this directory or the shared team workspace.\n"
+    "When delegating a file-based task, specify the relative path so the recipient "
+    "knows exactly where to read/write.\n"
+    "When receiving file-based tasks, check your workspace for files at the provided path.\n"
+    "Do NOT write files outside your workspace.\n"
+    "Team workspace.md: {workspace_path}/../workspace.md\n"
+    "  (Read this for project overview and shared context)\n"
+    "Team activity log: {workspace_path}/../agent_log.md\n"
+    "  (Append important events here using log_changes tool)\n\n"
     "--- COMMUNICATION PROTOCOL ---\n"
-    "Use these formats when messaging peers:\n"
-    "  TASK: [description] | DELEGATE TO: [peer] — assign a task to a peer\n"
+    "Use these formats when messaging peers (soft recommendation, not strict):\n"
+    "  TASK: [description] | OUTPUT: [where to write results] — assign a task\n"
     "  STATUS: [what you did] | BLOCKERS: [any] — progress update\n"
     "  RESULT: [output] | NEXT: [recommended action] — deliverable complete\n"
     "  HELP: [what you need] | CONTEXT: [background] — request assistance\n\n"
+    "Always make it clear: what needs doing and where output should go.\n\n"
+    "--- MEMORY USAGE ---\n"
+    "Use the 'memory' tool to store important facts, decisions, and context:\n"
+    "- Research findings and key data\n"
+    "- Decisions made and their rationale\n"
+    "- Configuration details, API endpoints, credentials\n"
+    "- Reusable patterns or common code snippets\n"
+    "When you learn something important, save it to memory immediately.\n"
+    "When starting a task, search memory for relevant context first.\n\n"
     "--- PEERS ---\n"
     "Your agent name: {agent_name}\n"
     "Your team: {team_id}\n"
@@ -76,6 +100,49 @@ COMMON_SOUL_TEMPLATE = (
 def _derive_workspace_path(team_id: str, agent_name: str) -> Path:
     """Return the on-disk workspace directory for an agent."""
     return WORKSPACE_ROOT / team_id / "workspace" / agent_name
+
+
+def _get_team_workspace_path(team_id: str) -> Path:
+    """Return the shared team workspace directory."""
+    return WORKSPACE_ROOT / team_id / "workspace"
+
+
+def _build_org_diagram(cfg: Dict[str, Any], team_id: str, current_agent: str) -> str:
+    """Build an ASCII org chart for all agents in the team."""
+    team_agents = {
+        name: a for name, a in cfg.get("agents", {}).items()
+        if a.get("team_id") == team_id
+    }
+    if not team_agents:
+        return "(no other team members)"
+
+    lines = []
+    for name, agent_cfg in sorted(team_agents.items()):
+        peers = agent_cfg.get("allowed_peers", [])
+        role = agent_cfg.get("role_soul", f"You are the {agent_cfg.get('name', name)}.").split('\n')[0]
+        is_you = " ← YOU" if name == current_agent else ""
+        peer_str = ", ".join(peers) if peers else "no links"
+        lines.append(f"  {name}: {role[:60]}{is_you}")
+        lines.append(f"    → links: {peer_str}")
+
+    return "\n".join(lines)
+
+
+def _build_team_members_list(cfg: Dict[str, Any], team_id: str) -> str:
+    """Build a list of all team members with their roles."""
+    team_agents = {
+        name: a for name, a in cfg.get("agents", {}).items()
+        if a.get("team_id") == team_id
+    }
+    if not team_agents:
+        return "(no other team members)"
+
+    lines = []
+    for name, agent_cfg in sorted(team_agents.items()):
+        role = agent_cfg.get("role_soul", f"You are the {agent_cfg.get('name', name)}.").split('\n')[0]
+        lines.append(f"  - {name}: {role}")
+
+    return "\n".join(lines)
 
 
 def _migrate_legacy_config(legacy: Dict[str, Any]) -> Dict[str, Any]:
@@ -170,24 +237,39 @@ def _default_config() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Soul composition — combines common + role-specific parts
 # ---------------------------------------------------------------------------
-def compose_agent_soul(agent_cfg: Dict[str, Any]) -> str:
+def compose_agent_soul(agent_cfg: Dict[str, Any], full_config: Optional[Dict[str, Any]] = None) -> str:
     """Build the full ephemeral system prompt for an agent."""
     agent_name = agent_cfg.get("name", "Agent")
     team_id = agent_cfg.get("team_id", "default")
     peers = agent_cfg.get("allowed_peers", [])
     peers_str = ", ".join(peers) if peers else "(none — you cannot message any peers yet)"
+    workspace_path = str(_derive_workspace_path(team_id, agent_cfg.get("agent_id", "unknown")))
+
+    # Build org diagram if we have full config
+    org_diagram = "(config not available for diagram)"
+    all_members = "(config not available for member list)"
+    if full_config:
+        org_diagram = _build_org_diagram(full_config, team_id, agent_cfg.get("agent_id", "unknown"))
+        all_members = _build_team_members_list(full_config, team_id)
 
     common = COMMON_SOUL_TEMPLATE.format(
         agent_name=agent_name,
         team_id=team_id,
         allowed_peers_list=peers_str,
         sweep_interval=SWEEP_INTERVAL_SECONDS,
+        workspace_path=workspace_path,
     )
 
     role = agent_cfg.get("role_soul", f"You are the {agent_name}.")
 
     return (
         f"{common}\n"
+        f"--- TEAM ORGANIZATION ---\n"
+        f"Your team: {team_id}\n\n"
+        f"Agent connections and roles:\n"
+        f"{org_diagram}\n\n"
+        f"All team members:\n"
+        f"{all_members}\n\n"
         f"{'=' * 60}\n"
         f"YOUR ROLE\n"
         f"{'=' * 60}\n"
@@ -253,7 +335,31 @@ def create_team(cfg: Dict[str, Any], team_id: str, name: str) -> Dict[str, Any]:
         raise ValueError(f"Team '{team_id}' already exists")
     cfg["teams"][team_id] = {"name": name, "created_at": int(time.time())}
     # Ensure workspace directory exists
-    (WORKSPACE_ROOT / team_id / "workspace").mkdir(parents=True, exist_ok=True)
+    team_ws = WORKSPACE_ROOT / team_id / "workspace"
+    team_ws.mkdir(parents=True, exist_ok=True)
+    # Create shared workspace.md
+    workspace_md = team_ws / "workspace.md"
+    if not workspace_md.exists():
+        workspace_md.write_text(
+            f"# Project: {name}\n\n"
+            "## Description\n"
+            "Describe the project here...\n\n"
+            "## Key Decisions\n"
+            "- Decision 1\n\n"
+            "## Active Tasks\n"
+            "- [PENDING] Task description (agent_name)\n\n"
+            "## Shared Files\n"
+            "- path/to/file: description\n",
+            encoding="utf-8",
+        )
+    # Create shared agent_log.md
+    agent_log = team_ws / "agent_log.md"
+    if not agent_log.exists():
+        agent_log.write_text(
+            "# Team Activity Log\n\n"
+            "Format: `[YYYY-MM-DD HH:MM:SS] agent_name: message`\n\n",
+            encoding="utf-8",
+        )
     _save_full_config(cfg)
     return cfg["teams"][team_id]
 
@@ -313,6 +419,13 @@ def create_agent(
     ws = _derive_workspace_path(team_id, name)
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "context").mkdir(exist_ok=True)
+    # Create agent-specific log
+    agent_log = ws / "agent_log.md"
+    if not agent_log.exists():
+        agent_log.write_text(
+            f"# {display_name} Activity Log\n\n",
+            encoding="utf-8",
+        )
     _save_full_config(cfg)
     return agent_cfg
 
@@ -346,24 +459,47 @@ def set_agent_peers(cfg: Dict[str, Any], name: str, peers: List[str]) -> Dict[st
 
 
 def add_agent_peer(cfg: Dict[str, Any], name: str, peer: str) -> Dict[str, Any]:
+    """Add a peer link. Links are ALWAYS bidirectional."""
     if name not in cfg["agents"]:
         raise ValueError(f"Agent '{name}' not found")
+    if peer not in cfg["agents"]:
+        raise ValueError(f"Peer agent '{peer}' not found")
+
+    # Add name -> peer
     peers = cfg["agents"][name].get("allowed_peers", [])
     if peer not in peers:
         peers.append(peer)
         cfg["agents"][name]["allowed_peers"] = peers
-        _save_full_config(cfg)
+
+    # Add peer -> name (bidirectional)
+    peer_peers = cfg["agents"][peer].get("allowed_peers", [])
+    if name not in peer_peers:
+        peer_peers.append(name)
+        cfg["agents"][peer]["allowed_peers"] = peer_peers
+
+    _save_full_config(cfg)
     return cfg["agents"][name]
 
 
 def remove_agent_peer(cfg: Dict[str, Any], name: str, peer: str) -> Dict[str, Any]:
+    """Remove a peer link. Links are ALWAYS bidirectional."""
     if name not in cfg["agents"]:
         raise ValueError(f"Agent '{name}' not found")
+
+    # Remove name -> peer
     peers = cfg["agents"][name].get("allowed_peers", [])
     if peer in peers:
         peers.remove(peer)
         cfg["agents"][name]["allowed_peers"] = peers
-        _save_full_config(cfg)
+
+    # Remove peer -> name (bidirectional)
+    if peer in cfg["agents"]:
+        peer_peers = cfg["agents"][peer].get("allowed_peers", [])
+        if name in peer_peers:
+            peer_peers.remove(name)
+            cfg["agents"][peer]["allowed_peers"] = peer_peers
+
+    _save_full_config(cfg)
     return cfg["agents"][name]
 
 
