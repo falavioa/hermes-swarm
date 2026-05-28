@@ -252,6 +252,7 @@ def _update_daemon_cfg(agent_name: str, new_cfg: Dict[str, Any]):
     if daemon is not None:
         with daemon._lock:
             daemon.cfg = new_cfg
+            daemon._ai_agent = None
 
 
 @app.get("/agent/{agent_name}/peers")
@@ -276,7 +277,10 @@ async def add_peers(agent_name: str, request: Request):
     if agent_name not in cfg["agents"]:
         return JSONResponse({"error": "agent not found"}, status_code=404)
 
-    set_agent_peers(cfg, agent_name, peers)
+    try:
+        set_agent_peers(cfg, agent_name, peers)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     _update_daemon_cfg(agent_name, cfg["agents"][agent_name])
     return JSONResponse({
         "status": "updated",

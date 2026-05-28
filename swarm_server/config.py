@@ -453,6 +453,13 @@ def delete_agent(cfg: Dict[str, Any], name: str) -> bool:
 def set_agent_peers(cfg: Dict[str, Any], name: str, peers: List[str]) -> Dict[str, Any]:
     if name not in cfg["agents"]:
         raise ValueError(f"Agent '{name}' not found")
+    name_team = cfg["agents"][name].get("team_id")
+    for peer in peers:
+        if peer not in cfg["agents"]:
+            raise ValueError(f"Peer agent '{peer}' not found")
+        peer_team = cfg["agents"][peer].get("team_id")
+        if name_team and peer_team and name_team != peer_team:
+            raise ValueError(f"Cross-team peer links are blocked: '{name}' (team={name_team}) → '{peer}' (team={peer_team})")
     cfg["agents"][name]["allowed_peers"] = list(peers)
     _save_full_config(cfg)
     return cfg["agents"][name]
@@ -464,6 +471,10 @@ def add_agent_peer(cfg: Dict[str, Any], name: str, peer: str) -> Dict[str, Any]:
         raise ValueError(f"Agent '{name}' not found")
     if peer not in cfg["agents"]:
         raise ValueError(f"Peer agent '{peer}' not found")
+    name_team = cfg["agents"][name].get("team_id")
+    peer_team = cfg["agents"][peer].get("team_id")
+    if name_team and peer_team and name_team != peer_team:
+        raise ValueError(f"Cross-team peer links are blocked: '{name}' (team={name_team}) → '{peer}' (team={peer_team})")
 
     # Add name -> peer
     peers = cfg["agents"][name].get("allowed_peers", [])
