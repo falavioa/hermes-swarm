@@ -415,6 +415,7 @@ function renderAgents() {
             <div class="agent-meta"><span>Queue: <span class="queue-badge">${a.pending_count || 0}</span></span><span style="font-family:var(--font-mono);font-size:10px">${a.config?.session_id?.slice(0,14)}...</span></div>
             <div class="agent-meta" style="margin-top:4px">${peerTags}</div>
             <div class="agent-actions">
+                ${(st === 'busy' || st === 'asking_human') ? `<button class="btn btn-sm" style="background:var(--danger);border-color:var(--danger);color:white" onclick="event.stopPropagation();stopAgent('${jsAttr(n)}')">■ Stop</button>` : ''}
                 <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();showLinkEditorFor('${jsAttr(n)}')">🔗</button>
                 <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removeAgent('${jsAttr(n)}')">×</button>
             </div>
@@ -752,6 +753,16 @@ async function removeAgent(name) {
         delete agentData[name];
         renderAgents(); renderNetwork(); renderQueues(); updateTarget();
         loadTeams();
+    } catch (e) { logEvent('error', e.message); }
+}
+
+async function stopAgent(name) {
+    if (!confirm(`Stop execution for agent "${name}"?\n\nAll pending tasks for this agent will be marked as done and the agent will go idle.`)) return;
+    try {
+        const res = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/stop`, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { logEvent('error', data.error); return; }
+        logEvent('system', data.message);
     } catch (e) { logEvent('error', e.message); }
 }
 

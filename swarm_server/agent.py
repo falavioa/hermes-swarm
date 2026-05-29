@@ -119,6 +119,7 @@ class AgentDaemon:
         self.human_event = threading.Event()
         self.human_response = None
         self.next_sweep_at = 0.0
+        self._stop_requested = False
 
     def _ensure_agent(self):
         if self._ai_agent is not None:
@@ -255,6 +256,65 @@ class AgentDaemon:
             "timestamp": time.time(),
         })
 
+    async def stop_execution(self) -> None:
+        """Halt the agent's current sweep, drain tasks, and restart the loop.
+
+        Cancels the in-flight sweep task (the result of any ongoing
+        run_conversation call in the executor is discarded on restart),
+        marks all pending tasks done so they are not re-processed, resets
+        state to idle, and starts a fresh sweep loop with a new executor.
+        """
+        log.info("[%s] Stop execution requested", self.name)
+        with self._lock:
+            self._stop_requested = True
+
+        # Cancel the sweep task. If run_conversation is in-flight the
+        # thread keeps going, but the sweep coroutine never handles the
+        # result — any post-run work is skipped because _stop_requested
+        # is True.
+        if self._sweep_task and not self._sweep_task.done():
+            self._sweep_task.cancel()
+            try:
+                await self._sweep_task
+            except asyncio.CancelledError:
+                pass
+
+        # Drain every pending task so they do not come back.
+        drained = self.queue.drain_pending(limit=9999)
+        for t in drained:
+            self.queue.mark_done(t["id"])
+        if drained:
+            log.info("[%s] Drained %d pending task(s) on stop", self.name, len(drained))
+
+        # Replace the executor so future sweeps run on a clean thread.
+        old_executor = self._executor
+        old_executor.shutdown(wait=False)
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"agent-{self.name}"
+        )
+
+        # Reset flags and state
+        with self._lock:
+            self._stop_requested = False
+            self.state = AGENT_STATE_IDLE
+            self.next_sweep_at = time.time() + SWEEP_INTERVAL_SECONDS
+        self._emit_state_change()
+
+        # Restart the sweep loop on the same event loop
+        if self._loop is not None:
+            self._sweep_task = self._loop.create_task(self.sweep_loop())
+            self._wake = asyncio.Event()
+            # Wake immediately so the loop is active
+            self._wake.set()
+
+        log.info("[%s] Execution stopped and sweep loop restarted", self.name)
+        monitor_db.log_event(self.name, "execution_stopped", data={"tasks_drained": len(drained)})
+        _broadcast("execution_stopped", {
+            "agent_name": self.name,
+            "tasks_drained": len(drained),
+            "timestamp": time.time(),
+        })
+
     def ingest_task(self, from_agent: str, payload: str) -> str:
         task_id = self.queue.enqueue(from_agent, payload)
         log.info("[%s] Task queued from '%s': %s", self.name, from_agent, payload[:80])
@@ -379,6 +439,11 @@ class AgentDaemon:
             response = await loop.run_in_executor(
                 self._executor, self._run_conversation_blocking, combined
             )
+            # If a stop was requested while the conversation was in-flight,
+            # discard the result entirely so no state is mutated.
+            if self._stop_requested:
+                log.info("[%s] Stop requested while conversation in-flight — discarding result", self.name)
+                return
             # Compaction during the run rotates session_id; persist it so the
             # next sweep (and a restart) resumes from the compacted session.
             self._persist_session_id_if_rotated()

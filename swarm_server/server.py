@@ -473,6 +473,20 @@ async def monitoring_recent(limit: int = 100):
 
 
 # ---------------------------------------------------------------------------
+# Stop Execution
+# ---------------------------------------------------------------------------
+@app.post("/agent/{agent_name}/stop")
+async def stop_agent_execution(agent_name: str):
+    daemon = daemons.get(agent_name)
+    if daemon is None:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if daemon.state == "idle":
+        return JSONResponse({"success": True, "message": f"Agent '{agent_name}' is already idle."})
+    await daemon.stop_execution()
+    return JSONResponse({"success": True, "message": f"Execution stopped for '{agent_name}'."})
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 @app.get("/health")
