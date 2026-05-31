@@ -651,8 +651,14 @@ def compose_live_context(
     cached/stored system prompt."""
     tree = _build_workspace_tree(team_id)
     recent = _recent_peer_messages(team_id, full_config, limit=10)
+    try:
+        from datetime import datetime
+        now_line = datetime.now().astimezone().strftime("%A, %B %d, %Y %H:%M:%S %Z")
+    except Exception:
+        now_line = "(unavailable)"
     return (
         "--- LIVE TEAM CONTEXT (auto-refreshed each turn) ---\n"
+        f"Current time: {now_line}\n\n"
         "Project directory structure (team workspace — every agent's outputs/ "
         "are visible here, so you can see what already exists):\n"
         f"{tree}\n\n"
