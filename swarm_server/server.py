@@ -27,6 +27,7 @@ from swarm_server.config import (
     SERVER_HOST,
     SERVER_PORT,
     SWARM_API_KEY,
+    add_agent_cron,
     add_agent_peer,
     create_agent,
     create_team,
@@ -34,12 +35,15 @@ from swarm_server.config import (
     delete_team,
     get_agent_team,
     get_team_agents,
+    list_agent_crons,
     list_teams,
     load_agents_config,
+    remove_agent_cron,
     remove_agent_peer,
     save_agent_config,
     save_all_config,
     set_agent_peers,
+    update_agent_cron,
     _derive_workspace_path,
 )
 from swarm_server.monitoring import monitor_db
@@ -330,6 +334,8 @@ def _update_daemon_cfg(agent_name: str, new_cfg: Dict[str, Any]):
             # Refresh runtime knobs read outside _ensure_agent (heartbeat + sweep).
             daemon._autonomous = bool(new_cfg.get("autonomous", False))
             daemon._sweep_interval = daemon._resolve_sweep_interval(new_cfg)
+            daemon._heartbeat_seconds = daemon._resolve_heartbeat_interval(new_cfg)
+            daemon._load_crons(new_cfg)
 
 
 @app.get("/agent/{agent_name}/peers")
@@ -420,13 +426,13 @@ async def update_agent_soul(agent_name: str, request: Request):
 # Fields the UI may edit via the config endpoint. Everything else in the stored
 # cfg (team_id, session_id, allowed_peers, …) is left untouched.
 _EDITABLE_AGENT_FIELDS = {
-    "name", "model", "provider", "autonomous", "sweep_interval",
+    "name", "model", "provider", "autonomous", "sweep_interval", "heartbeat_seconds",
     "temperature", "max_tokens", "reasoning_effort", "max_iterations",
     "enabled_toolsets", "disabled_toolsets", "compression_threshold", "role_soul",
 }
 # Numeric fields where an empty value means "clear → use the default".
 _NUMERIC_CLEARABLE = (
-    "sweep_interval", "temperature", "max_tokens",
+    "sweep_interval", "heartbeat_seconds", "temperature", "max_tokens",
     "max_iterations", "compression_threshold",
 )
 
@@ -559,6 +565,7 @@ async def get_agent_config(agent_name: str):
         "provider": a.get("provider"),
         "autonomous": bool(a.get("autonomous", False)),
         "sweep_interval": a.get("sweep_interval"),
+        "heartbeat_seconds": a.get("heartbeat_seconds"),
         "temperature": a.get("temperature"),
         "max_tokens": a.get("max_tokens"),
         "reasoning_effort": a.get("reasoning_effort"),
@@ -600,6 +607,98 @@ async def patch_agent_config(agent_name: str, request: Request):
         "timestamp": __import__("time").time(),
     })
     return JSONResponse({"status": "updated", "agent_name": agent_name, "config": updated})
+
+
+# ---------------------------------------------------------------------------
+# Per-agent cron wake-ups (CRUD). Schedules are validated in config; the running
+# daemon is refreshed so changes take effect on its next sweep tick.
+# ---------------------------------------------------------------------------
+def _crons_with_runtime(agent_name: str, stored: list) -> list:
+    """Merge stored crons with the daemon's live next/last-fire timestamps and a
+    human-readable schedule description for the dashboard."""
+    from swarm_server.cron import cron_describe
+
+    daemon = daemons.get(agent_name)
+    runtime = {c.get("id"): c for c in daemon.crons_runtime()} if daemon else {}
+    out = []
+    for c in stored:
+        rt = runtime.get(c.get("id"), {})
+        out.append({
+            **c,
+            "describe": cron_describe(c.get("schedule", "")),
+            "next_fire_at": rt.get("next_fire_at"),
+            "last_fired_at": rt.get("last_fired_at"),
+        })
+    return out
+
+
+@app.get("/agent/{agent_name}/crons")
+async def get_agent_crons(agent_name: str):
+    cfg = load_agents_config()
+    if agent_name not in cfg["agents"]:
+        return JSONResponse({"error": "agent not found"}, status_code=404)
+    stored = list_agent_crons(cfg, agent_name)
+    return JSONResponse({"agent_name": agent_name, "crons": _crons_with_runtime(agent_name, stored)})
+
+
+@app.post("/agent/{agent_name}/crons")
+async def post_agent_cron(agent_name: str, request: Request):
+    body = await request.json()
+    cfg = load_agents_config()
+    if agent_name not in cfg["agents"]:
+        return JSONResponse({"error": "agent not found"}, status_code=404)
+    try:
+        entry = add_agent_cron(
+            cfg, agent_name,
+            schedule=body.get("schedule", ""),
+            instruction=body.get("instruction", ""),
+            enabled=body.get("enabled", True),
+            created_by="human",
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    _refresh_daemon_crons(agent_name)
+    return JSONResponse({"status": "created", "cron": entry})
+
+
+@app.patch("/agent/{agent_name}/crons/{cron_id}")
+async def patch_agent_cron(agent_name: str, cron_id: str, request: Request):
+    body = await request.json()
+    cfg = load_agents_config()
+    if agent_name not in cfg["agents"]:
+        return JSONResponse({"error": "agent not found"}, status_code=404)
+    fields = {k: body[k] for k in ("schedule", "instruction", "enabled") if k in body}
+    try:
+        entry = update_agent_cron(cfg, agent_name, cron_id, fields)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    _refresh_daemon_crons(agent_name)
+    return JSONResponse({"status": "updated", "cron": entry})
+
+
+@app.delete("/agent/{agent_name}/crons/{cron_id}")
+async def del_agent_cron(agent_name: str, cron_id: str):
+    cfg = load_agents_config()
+    if agent_name not in cfg["agents"]:
+        return JSONResponse({"error": "agent not found"}, status_code=404)
+    removed = remove_agent_cron(cfg, agent_name, cron_id)
+    if not removed:
+        return JSONResponse({"error": "cron not found"}, status_code=404)
+    _refresh_daemon_crons(agent_name)
+    return JSONResponse({"status": "deleted", "cron_id": cron_id})
+
+
+def _refresh_daemon_crons(agent_name: str):
+    """Reload the agent's crons into its running daemon and notify the dashboard."""
+    daemon = daemons.get(agent_name)
+    if daemon is not None:
+        entry = load_agents_config()["agents"].get(agent_name, daemon.cfg)
+        with daemon._lock:
+            daemon.cfg = entry
+            daemon._load_crons(entry)
+    from swarm_server.websocket import _broadcast
+
+    _broadcast("cron_updated", {"agent_name": agent_name, "timestamp": __import__("time").time()})
 
 
 @app.get("/toolsets")

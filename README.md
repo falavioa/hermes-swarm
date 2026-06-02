@@ -81,7 +81,15 @@ confirm what it found.
 | `HERMES_AGENT_PATH` | *(unset)* | path to a Hermes source checkout (only if not pip-installed) |
 
 Per-agent settings (model, provider, tools, reasoning, iterations, sampling,
-soul) are edited live from the dashboard's ⚙️ panel — no restart needed.
+soul, autonomous wake-up interval, and **cron wake-ups**) are edited live from
+the dashboard's ⚙️ panel — no restart needed. `SWARM_HEARTBEAT_SECONDS` is just
+the default; each agent's idle wake-up cadence can be overridden in its settings.
+
+**Scheduled wake-ups (cron):** every agent can run recurring work on a schedule
+— a 9am competitor check, an hourly metrics pull, a Monday digest. Add/enable/
+delete schedules from the ⚙️ panel (5-field cron, `@hourly`/`@daily`/`@weekly`/
+`@monthly`, or intervals like `@every 30m`); agents can also self-schedule and
+cancel their own via the `schedule_wakeup` / `cancel_wakeup` tools.
 
 ---
 

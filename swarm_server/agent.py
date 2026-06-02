@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from swarm_server.config import (
     AUTONOMOUS_HEARTBEAT_PROMPT,
     AUTONOMOUS_HEARTBEAT_SECONDS,
+    CRON_WAKEUP_PROMPT,
     LITELLM_API_BASE,
     LLM_API_KEY,
     LLM_ERROR_EMIT_THROTTLE_SECONDS,
@@ -150,6 +151,19 @@ class AgentDaemon:
         # Per-agent sweep interval (falls back to the global default). Lets the UI
         # tune how often a specific agent polls its queue.
         self._sweep_interval = self._resolve_sweep_interval(cfg)
+        # Per-agent autonomous-heartbeat interval (falls back to the global
+        # default). Configurable from the UI so each agent's 24/7 cadence is tuned
+        # independently of the launch-time SWARM_HEARTBEAT_SECONDS.
+        self._heartbeat_seconds = self._resolve_heartbeat_interval(cfg)
+        # Scheduled cron wake-ups. self._crons is the config list; self._cron_next
+        # maps cron-id -> next fire timestamp; self._cron_last -> last fire ts;
+        # self._cron_sched remembers each cron's schedule so a config reload only
+        # recomputes the next-fire time for schedules that actually changed.
+        self._crons: List[Dict[str, Any]] = []
+        self._cron_next: Dict[str, float] = {}
+        self._cron_last: Dict[str, float] = {}
+        self._cron_sched: Dict[str, str] = {}
+        self._load_crons(cfg)
         # Monotonic sequence for ephemeral live-execution events (exec_*). Lets the
         # dashboard order/dedupe the streamed thinking/tool/answer steps per turn.
         self._exec_seq = 0
@@ -164,6 +178,60 @@ class AgentDaemon:
             return v if v >= 1 else float(SWEEP_INTERVAL_SECONDS)
         except (TypeError, ValueError):
             return float(SWEEP_INTERVAL_SECONDS)
+
+    @staticmethod
+    def _resolve_heartbeat_interval(cfg: Dict[str, Any]) -> float:
+        """Per-agent idle-heartbeat interval, falling back to the global default.
+        Clamped to a 60s floor so a typo can't spin the agent every few seconds."""
+        try:
+            v = float(cfg.get("heartbeat_seconds") or 0)
+            return v if v >= 60 else float(AUTONOMOUS_HEARTBEAT_SECONDS)
+        except (TypeError, ValueError):
+            return float(AUTONOMOUS_HEARTBEAT_SECONDS)
+
+    def _load_crons(self, cfg: Dict[str, Any]) -> None:
+        """(Re)load cron wake-ups from config, preserving the next-fire time of any
+        schedule that didn't change so an unrelated config save can't reset timers."""
+        from swarm_server.cron import cron_next
+
+        crons = list(cfg.get("crons") or [])
+        now = time.time()
+        new_next: Dict[str, float] = {}
+        new_sched: Dict[str, str] = {}
+        for c in crons:
+            cid = c.get("id")
+            sched = c.get("schedule") or ""
+            if not cid or not c.get("enabled", True):
+                continue
+            new_sched[cid] = sched
+            # Keep the existing next-fire time iff this schedule is unchanged.
+            if cid in self._cron_next and self._cron_sched.get(cid) == sched:
+                new_next[cid] = self._cron_next[cid]
+                continue
+            try:
+                nxt = cron_next(sched, now)
+            except Exception as e:  # noqa: BLE001 — a bad schedule must not crash load
+                log.warning("[%s] cron '%s' (%s) skipped: %s", self.name, cid, sched, e)
+                nxt = None
+            if nxt is not None:
+                new_next[cid] = nxt
+        self._crons = crons
+        self._cron_next = new_next
+        self._cron_sched = new_sched
+        # Drop last-fired entries for crons that no longer exist.
+        self._cron_last = {k: v for k, v in self._cron_last.items() if k in new_sched}
+
+    def crons_runtime(self) -> List[Dict[str, Any]]:
+        """Cron entries enriched with live next/last-fire timestamps, for the UI."""
+        out = []
+        for c in self._crons:
+            cid = c.get("id")
+            out.append({
+                **c,
+                "next_fire_at": self._cron_next.get(cid),
+                "last_fired_at": self._cron_last.get(cid),
+            })
+        return out
 
     @staticmethod
     def _is_infra_failure(err: str) -> bool:
@@ -390,6 +458,21 @@ class AgentDaemon:
                     self._ai_agent.tools = list(self._ai_agent.tools or [])
                     self._ai_agent.tools.append(_REQUEST_CONFIG_CHANGE_TOOL_SCHEMA)
                     self._ai_agent.valid_tool_names.add("request_config_change")
+                # Cron self-scheduling: agents create/cancel their own recurring
+                # wake-ups (managed + visible in the dashboard). Registered in the
+                # Hermes registry above; exposed to the LLM here like the others.
+                from swarm_server.tools import (
+                    _SCHEDULE_WAKEUP_TOOL_SCHEMA,
+                    _CANCEL_WAKEUP_TOOL_SCHEMA,
+                )
+                if "schedule_wakeup" not in existing_names:
+                    self._ai_agent.tools = list(self._ai_agent.tools or [])
+                    self._ai_agent.tools.append(_SCHEDULE_WAKEUP_TOOL_SCHEMA)
+                    self._ai_agent.valid_tool_names.add("schedule_wakeup")
+                if "cancel_wakeup" not in existing_names:
+                    self._ai_agent.tools = list(self._ai_agent.tools or [])
+                    self._ai_agent.tools.append(_CANCEL_WAKEUP_TOOL_SCHEMA)
+                    self._ai_agent.valid_tool_names.add("cancel_wakeup")
 
                 # Force tool-use enforcement guidance — agents must end their turn
                 # with a tool call (send_peer_message / ask_human) rather than
@@ -594,14 +677,21 @@ class AgentDaemon:
     async def sweep_loop(self):
         log.info("[%s] Sweep loop started (interval=%ss, event-driven)", self.name, self._sweep_interval)
         while True:
-            self.next_sweep_at = time.time() + self._sweep_interval
-            # Wake on a new task, or fall through on the periodic safety tick.
+            # Wake on a new task, the periodic safety tick, or — when crons are
+            # scheduled — early enough that the soonest cron fires within ~a tick
+            # of its time even if the sweep interval is long.
+            timeout = self._sweep_interval
+            due_in = self._next_cron_due_in()
+            if due_in is not None:
+                timeout = max(1.0, min(timeout, due_in))
+            self.next_sweep_at = time.time() + timeout
             try:
-                await asyncio.wait_for(self._wake.wait(), timeout=self._sweep_interval)
+                await asyncio.wait_for(self._wake.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
             await self._sweep()
+            self._maybe_fire_crons()
             self._maybe_autonomous_heartbeat()
 
     async def _sweep(self):
@@ -660,7 +750,7 @@ class AgentDaemon:
                 return
         except Exception:
             return
-        if time.time() - self._last_active < AUTONOMOUS_HEARTBEAT_SECONDS:
+        if time.time() - self._last_active < self._heartbeat_seconds:
             return
         self._last_active = time.time()
         log.info("[%s] Autonomous heartbeat — injecting continue-mission task", self.name)
@@ -670,6 +760,61 @@ class AgentDaemon:
             time=datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
         )
         self.ingest_task("autonomous", prompt)
+
+    def _maybe_fire_crons(self) -> None:
+        """Inject the instruction of any cron wake-up whose time has come.
+
+        Runs every sweep tick. Each due cron enqueues its instruction as a task
+        (regardless of autonomous flag — a cron is an explicit schedule), records
+        the fire time, and rolls forward to its next occurrence. Independent of
+        the idle heartbeat: a cron fires on time even while other work is queued.
+        """
+        if self._stop_requested or not self._cron_next:
+            return
+        from swarm_server.cron import cron_next
+
+        now = time.time()
+        # Snapshot ids so rescheduling inside the loop can't churn the dict iter.
+        due = [cid for cid, ts in list(self._cron_next.items()) if ts is not None and now >= ts]
+        if not due:
+            return
+        by_id = {c.get("id"): c for c in self._crons}
+        for cid in due:
+            c = by_id.get(cid)
+            if c is None or not c.get("enabled", True):
+                self._cron_next.pop(cid, None)
+                continue
+            sched = c.get("schedule") or ""
+            import datetime
+            prompt = CRON_WAKEUP_PROMPT.format(
+                schedule=sched,
+                time=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+                instruction=c.get("instruction", ""),
+            )
+            log.info("[%s] Cron '%s' (%s) fired — injecting scheduled task", self.name, cid, sched)
+            monitor_db.log_event(self.name, "cron_fired", data={"cron_id": cid, "schedule": sched})
+            _broadcast("cron_fired", {
+                "agent_name": self.name,
+                "cron_id": cid,
+                "schedule": sched,
+                "timestamp": now,
+            })
+            self.ingest_task("cron", prompt)
+            self._cron_last[cid] = now
+            # Roll forward to the next occurrence (strictly after now).
+            try:
+                self._cron_next[cid] = cron_next(sched, now)
+            except Exception:
+                self._cron_next.pop(cid, None)
+
+    def _next_cron_due_in(self) -> Optional[float]:
+        """Seconds until the soonest pending cron fire, or None if no crons."""
+        if not self._cron_next:
+            return None
+        soonest = min((ts for ts in self._cron_next.values() if ts is not None), default=None)
+        if soonest is None:
+            return None
+        return max(0.0, soonest - time.time())
 
     # ------------------------------------------------------------------
     # Live execution streaming (ephemeral; dashboard-only)

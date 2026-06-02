@@ -283,6 +283,17 @@ AUTONOMOUS_HEARTBEAT_PROMPT = (
     "Current Time: {time}"
 )
 
+# Injected as a task when a per-agent cron wake-up fires (see AgentDaemon._maybe_fire_crons
+# and the schedule_wakeup tool). Unlike the heartbeat, a cron carries a SPECIFIC
+# instruction the agent (or operator) attached when scheduling it.
+CRON_WAKEUP_PROMPT = (
+    "[SCHEDULED WAKE-UP — cron '{schedule}' fired at {time}; you run 24/7 and "
+    "nobody may be watching]\n"
+    "This is an automated wake-up you or your operator scheduled. Carry out the "
+    "instruction below, then end your turn (do not loop):\n\n"
+    "{instruction}"
+)
+
 # ---------------------------------------------------------------------------
 # Tool output caps — bound a single tool result's size in the conversation.
 # A browser DOM snapshot or a big file read can be hundreds of KB; with 12
@@ -790,6 +801,30 @@ def _recent_peer_messages(team_id: str, full_config: Optional[Dict[str, Any]], l
         return f"(could not load peer messages: {e})"
 
 
+def _build_cron_summary(full_config: Optional[Dict[str, Any]], agent_id: str) -> str:
+    """One line per scheduled wake-up this agent currently has, for the prompt."""
+    if not full_config:
+        return "(unavailable)"
+    crons = (full_config.get("agents", {}).get(agent_id, {}) or {}).get("crons") or []
+    if not crons:
+        return "(none — you have no scheduled wake-ups)"
+    try:
+        from swarm_server.cron import cron_describe
+    except Exception:
+        cron_describe = lambda s: s  # noqa: E731
+    lines = []
+    for c in crons:
+        state = "enabled" if c.get("enabled", True) else "disabled"
+        instr = (c.get("instruction") or "").replace("\n", " ")
+        if len(instr) > 100:
+            instr = instr[:100] + "…"
+        lines.append(
+            f"- [{state}] {c.get('schedule')} ({cron_describe(c.get('schedule', ''))})"
+            f" → {instr}  (id={c.get('id')})"
+        )
+    return "\n".join(lines)
+
+
 def compose_live_context(
     team_id: str,
     agent_id: str,
@@ -801,6 +836,7 @@ def compose_live_context(
     cached/stored system prompt."""
     tree = _build_workspace_tree(team_id)
     recent = _recent_peer_messages(team_id, full_config, limit=10)
+    crons = _build_cron_summary(full_config, agent_id)
     try:
         from datetime import datetime
         now_line = datetime.now().astimezone().strftime("%A, %B %d, %Y %H:%M %Z")
@@ -813,7 +849,9 @@ def compose_live_context(
         "are visible here, so you can see what already exists):\n"
         f"{tree}\n\n"
         "Last 10 messages between teammates (send_peer_message), oldest first:\n"
-        f"{recent}\n"
+        f"{recent}\n\n"
+        "Your scheduled cron wake-ups (manage with schedule_wakeup / cancel_wakeup):\n"
+        f"{crons}\n"
     )
 
 
@@ -1204,6 +1242,104 @@ def peer_allowed(cfg: Dict[str, Any], caller: str, target: str) -> bool:
     if caller_cfg.get("team_id") != target_cfg.get("team_id"):
         return False
     return target in caller_cfg.get("allowed_peers", [])
+
+
+# ---------------------------------------------------------------------------
+# Per-agent cron wake-ups
+# ---------------------------------------------------------------------------
+# Each agent may carry a ``crons`` list in its config; every entry is a
+# self-contained schedule that injects ``instruction`` as a task when it fires.
+# Both the human (dashboard / REST) and the agent itself (schedule_wakeup tool)
+# create these; the AgentDaemon evaluates them in its sweep loop. The schedule
+# string is validated with cron.cron_validate before it is ever stored.
+import uuid as _uuid
+
+MAX_CRONS_PER_AGENT = int(os.environ.get("SWARM_MAX_CRONS_PER_AGENT", "25"))
+
+
+def list_agent_crons(cfg: Dict[str, Any], name: str) -> List[Dict[str, Any]]:
+    a = cfg["agents"].get(name)
+    if a is None:
+        raise ValueError(f"Agent '{name}' not found")
+    return list(a.get("crons") or [])
+
+
+def add_agent_cron(
+    cfg: Dict[str, Any],
+    name: str,
+    schedule: str,
+    instruction: str,
+    enabled: bool = True,
+    created_by: str = "human",
+) -> Dict[str, Any]:
+    """Validate + append a cron wake-up to an agent. Returns the new entry."""
+    from swarm_server.cron import cron_validate
+
+    a = cfg["agents"].get(name)
+    if a is None:
+        raise ValueError(f"Agent '{name}' not found")
+    instruction = (instruction or "").strip()
+    if not instruction:
+        raise ValueError("A cron wake-up needs an instruction to run when it fires.")
+    ok, norm = cron_validate(schedule or "")
+    if not ok:
+        raise ValueError(f"Invalid schedule: {norm}")
+    crons = a.setdefault("crons", [])
+    if len(crons) >= MAX_CRONS_PER_AGENT:
+        raise ValueError(f"Cron limit reached ({MAX_CRONS_PER_AGENT}). Delete one first.")
+    entry = {
+        "id": str(_uuid.uuid4()),
+        "schedule": norm,
+        "instruction": instruction,
+        "enabled": bool(enabled),
+        "created_at": int(time.time()),
+        "created_by": created_by,
+    }
+    crons.append(entry)
+    _save_full_config(cfg)
+    return entry
+
+
+def update_agent_cron(
+    cfg: Dict[str, Any], name: str, cron_id: str, fields: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Patch an existing cron (schedule / instruction / enabled). Returns the entry."""
+    from swarm_server.cron import cron_validate
+
+    a = cfg["agents"].get(name)
+    if a is None:
+        raise ValueError(f"Agent '{name}' not found")
+    for c in a.get("crons", []):
+        if c.get("id") != cron_id:
+            continue
+        if "schedule" in fields:
+            ok, norm = cron_validate(fields["schedule"] or "")
+            if not ok:
+                raise ValueError(f"Invalid schedule: {norm}")
+            c["schedule"] = norm
+        if "instruction" in fields:
+            instr = (fields["instruction"] or "").strip()
+            if not instr:
+                raise ValueError("Instruction cannot be empty.")
+            c["instruction"] = instr
+        if "enabled" in fields:
+            c["enabled"] = bool(fields["enabled"])
+        _save_full_config(cfg)
+        return c
+    raise ValueError(f"Cron '{cron_id}' not found on agent '{name}'")
+
+
+def remove_agent_cron(cfg: Dict[str, Any], name: str, cron_id: str) -> bool:
+    a = cfg["agents"].get(name)
+    if a is None:
+        raise ValueError(f"Agent '{name}' not found")
+    crons = a.get("crons") or []
+    remaining = [c for c in crons if c.get("id") != cron_id]
+    if len(remaining) == len(crons):
+        return False
+    a["crons"] = remaining
+    _save_full_config(cfg)
+    return True
 
 
 # Ensure tool subprocesses (rg/grep/find) always have a usable PATH, no matter

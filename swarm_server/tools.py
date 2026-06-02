@@ -89,7 +89,7 @@ def mark_timed_out(qid: str) -> None:
 SELF_CONFIG_ALLOWED_KEYS = (
     "model", "provider", "temperature", "max_tokens", "reasoning_effort",
     "sweep_interval", "max_iterations", "enabled_toolsets", "disabled_toolsets",
-    "compression_threshold", "autonomous",
+    "compression_threshold", "autonomous", "heartbeat_seconds",
 )
 
 _pending_config_proposals: Dict[str, Dict[str, Any]] = {}
@@ -228,12 +228,67 @@ _REQUEST_CONFIG_CHANGE_TOOL_SCHEMA = {
                         "Map of setting -> new value. Allowed keys: model, provider, "
                         "temperature, max_tokens, reasoning_effort, sweep_interval, "
                         "max_iterations, enabled_toolsets, disabled_toolsets, "
-                        "compression_threshold, autonomous."
+                        "compression_threshold, autonomous, heartbeat_seconds."
                     ),
                 },
                 "reason": {"type": "string", "description": "Why this change is warranted."},
             },
             "required": ["changes", "reason"],
+        },
+    },
+}
+
+
+_SCHEDULE_WAKEUP_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "schedule_wakeup",
+        "description": (
+            "Schedule a recurring future wake-up for YOURSELF. At each scheduled "
+            "time the swarm injects your 'instruction' to you as a new task and you "
+            "act on it — use this for anything periodic (a 9am competitor check, an "
+            "hourly metrics pull, a Monday digest) so it happens on time without a "
+            "human. The instruction must be SELF-CONTAINED: when it fires you may "
+            "have no other context. Check your current wake-ups (listed in the live "
+            "team context) first so you don't create duplicates."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "schedule": {
+                    "type": "string",
+                    "description": (
+                        "When to fire. Standard 5-field cron 'min hour day month weekday' "
+                        "(e.g. '0 9 * * 1-5' = 9am weekdays, '*/30 * * * *' = every 30 min), "
+                        "a macro (@hourly, @daily, @weekly, @monthly), or an interval "
+                        "(@every 30m, @every 2h). Server local time."
+                    ),
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "The self-contained task to run each time it fires.",
+                },
+            },
+            "required": ["schedule", "instruction"],
+        },
+    },
+}
+
+_CANCEL_WAKEUP_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "cancel_wakeup",
+        "description": (
+            "Cancel one of your scheduled cron wake-ups by its id. The ids of your "
+            "current wake-ups are listed in the live team context. Use this to remove "
+            "a schedule you no longer need or one you created by mistake."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cron_id": {"type": "string", "description": "The id of the wake-up to cancel."},
+            },
+            "required": ["cron_id"],
         },
     },
 }
@@ -481,12 +536,14 @@ def _get_self_config_handler(args: dict, **kwargs) -> str:
     editable["model"] = editable.get("model") or DEFAULT_MODEL
     daemon = _daemon_registry.get(caller)
     telemetry = dict(getattr(daemon, "_telemetry", {}) or {}) if daemon else {}
+    crons = daemon.crons_runtime() if daemon else list(a.get("crons") or [])
     return json.dumps({
         "success": True,
         "agent_name": caller,
         "team_id": a.get("team_id"),
         "config": editable,
         "allowed_peers": a.get("allowed_peers", []),
+        "crons": crons,
         "telemetry": telemetry,
     }, default=str)
 
@@ -526,6 +583,85 @@ def _request_config_change_handler(args: dict, **kwargs) -> str:
             "ONLY if they approve it in the dashboard. Do not assume it is applied."
         ),
     })
+
+
+def reload_daemon_crons(agent_name: str) -> None:
+    """Re-read an agent's crons from saved config into its running daemon.
+
+    Shared by the schedule_wakeup / cancel_wakeup tools and the REST endpoints so
+    a cron change takes effect immediately without re-initialising the AIAgent.
+    """
+    from swarm_server.config import load_agents_config
+
+    daemon = _daemon_registry.get(agent_name)
+    if daemon is None:
+        return
+    entry = load_agents_config()["agents"].get(agent_name)
+    if entry is None:
+        return
+    with daemon._lock:
+        daemon.cfg = entry
+        daemon._load_crons(entry)
+
+
+def _schedule_wakeup_handler(args: dict, **kwargs) -> str:
+    caller = _caller_from_kwargs(kwargs)
+    schedule = (args.get("schedule") or "").strip()
+    instruction = (args.get("instruction") or "").strip()
+    from swarm_server.config import load_agents_config, add_agent_cron
+    from swarm_server.cron import cron_next, cron_describe
+
+    cfg = load_agents_config()
+    if caller not in cfg["agents"]:
+        return json.dumps({"success": False, "error": f"Agent '{caller}' not found."})
+    try:
+        entry = add_agent_cron(cfg, caller, schedule, instruction, created_by="agent")
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    reload_daemon_crons(caller)
+    nxt = None
+    try:
+        nxt_ts = cron_next(entry["schedule"], time.time())
+        if nxt_ts:
+            from datetime import datetime
+            nxt = datetime.fromtimestamp(nxt_ts).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+
+    log.info("[%s] [schedule_wakeup] id=%s schedule=%s", caller, entry["id"][:8], entry["schedule"])
+    monitor_db.log_event(caller, "cron_created", data={"cron_id": entry["id"], "schedule": entry["schedule"]})
+    _broadcast("cron_updated", {"agent_name": caller, "action": "created", "timestamp": time.time()})
+    return json.dumps({
+        "success": True,
+        "cron_id": entry["id"],
+        "schedule": entry["schedule"],
+        "describe": cron_describe(entry["schedule"]),
+        "next_fire_at": nxt,
+        "message": f"Wake-up scheduled ({cron_describe(entry['schedule'])}). Next fire: {nxt or 'unknown'}.",
+    })
+
+
+def _cancel_wakeup_handler(args: dict, **kwargs) -> str:
+    caller = _caller_from_kwargs(kwargs)
+    cron_id = (args.get("cron_id") or "").strip()
+    from swarm_server.config import load_agents_config, remove_agent_cron
+
+    cfg = load_agents_config()
+    if caller not in cfg["agents"]:
+        return json.dumps({"success": False, "error": f"Agent '{caller}' not found."})
+    try:
+        removed = remove_agent_cron(cfg, caller, cron_id)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    if not removed:
+        return json.dumps({"success": False, "error": f"No wake-up with id '{cron_id}'."})
+
+    reload_daemon_crons(caller)
+    log.info("[%s] [cancel_wakeup] removed id=%s", caller, cron_id[:8])
+    monitor_db.log_event(caller, "cron_deleted", data={"cron_id": cron_id})
+    _broadcast("cron_updated", {"agent_name": caller, "action": "deleted", "timestamp": time.time()})
+    return json.dumps({"success": True, "message": f"Wake-up '{cron_id}' cancelled."})
 
 
 # ---------------------------------------------------------------------------
@@ -583,5 +719,23 @@ def _register_custom_tools():
                 description="Propose a change to your own config (human approves).",
             )
             log.info("[request_config_change] Registered")
+        if "schedule_wakeup" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="schedule_wakeup",
+                toolset="custom",
+                schema=_SCHEDULE_WAKEUP_TOOL_SCHEMA["function"],
+                handler=_schedule_wakeup_handler,
+                description="Schedule a recurring cron wake-up for yourself.",
+            )
+            log.info("[schedule_wakeup] Registered")
+        if "cancel_wakeup" not in (registry.get_tool_to_toolset_map() or {}):
+            registry.register(
+                name="cancel_wakeup",
+                toolset="custom",
+                schema=_CANCEL_WAKEUP_TOOL_SCHEMA["function"],
+                handler=_cancel_wakeup_handler,
+                description="Cancel one of your scheduled cron wake-ups by id.",
+            )
+            log.info("[cancel_wakeup] Registered")
     except Exception as exc:
         log.warning("[Custom Tools] Could not register in Hermes registry: %s", exc)

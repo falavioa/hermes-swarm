@@ -244,6 +244,23 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 .cfg-cli code { color: var(--accent-bright); word-break: break-all; flex: 1; }
 .cfg-cli .cli-copy { cursor: pointer; color: var(--text-muted); flex-shrink: 0; }
 .cfg-cli .cli-copy:hover { color: var(--accent-bright); }
+/* cron wake-ups */
+.cfg-crons { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 8px; font-size: 11px; }
+.cron-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border); }
+.cron-row:last-child { border-bottom: none; }
+.cron-row.disabled { opacity: 0.5; }
+.cron-main { flex: 1; min-width: 0; }
+.cron-sched { font-family: var(--font-mono); color: var(--accent-bright); font-size: 11px; }
+.cron-desc { color: var(--text-muted); font-size: 10px; }
+.cron-instr { color: var(--text); font-size: 11px; margin-top: 2px; word-break: break-word; }
+.cron-next { color: var(--text-muted); font-size: 10px; margin-top: 2px; }
+.cron-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.cron-del { cursor: pointer; color: var(--text-muted); font-size: 13px; }
+.cron-del:hover { color: var(--danger); }
+.cron-add { display: flex; gap: 6px; margin-top: 8px; }
+.cron-add .control-input { margin: 0; }
+.cron-add #cfg-cron-sched { flex: 0 0 38%; }
+.cron-empty { color: var(--text-muted); font-size: 11px; padding: 2px; }
 /* agent-card context usage bar */
 .card-ctx { height: 4px; background: var(--bg-input); border-radius: 999px; overflow: hidden; margin-top: 8px; }
 .card-ctx-fill { height: 100%; border-radius: 999px; transition: width 0.4s; }
@@ -386,13 +403,23 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
             </div>
             <div class="cfg-row">
                 <div class="control-group"><span class="control-label">Compression threshold (0–1)</span><input class="control-input" id="cfg-compress" type="number" step="0.05" min="0.1" max="0.95" placeholder="default"></div>
-                <div class="control-group"></div>
+                <div class="control-group"><span class="control-label">Autonomous wake-up every (s)</span><input class="control-input" id="cfg-heartbeat" type="number" min="60" placeholder="default 1800"></div>
             </div>
             <div class="control-group"><span class="control-label">Enabled toolsets (comma; blank = defaults)</span><input class="control-input" id="cfg-entools" list="toolset-list" placeholder="e.g. web, terminal, file, browser"></div>
             <div class="control-group"><span class="control-label">Disabled toolsets (comma)</span><input class="control-input" id="cfg-distools" list="toolset-list" placeholder="e.g. computer_use"></div>
             <datalist id="toolset-list"></datalist>
             <div class="control-group"><span class="control-label">Role Soul (identity prompt)</span><textarea class="control-textarea" id="cfg-soul" style="min-height:120px"></textarea></div>
-            <div style="font-size:10px;color:var(--text-muted);line-height:1.5">Model, sampling, tools &amp; soul changes take effect on the agent's next turn (it re-initialises). Autonomous &amp; sweep apply immediately. Leave a numeric field blank to use the default.</div>
+            <div style="font-size:10px;color:var(--text-muted);line-height:1.5">Model, sampling, tools &amp; soul changes take effect on the agent's next turn (it re-initialises). Autonomous, sweep &amp; wake-up interval apply immediately. Leave a numeric field blank to use the default.</div>
+            <div class="control-group" style="margin-top:12px">
+                <span class="control-label">⏰ Scheduled wake-ups (cron)</span>
+                <div id="cfg-crons" class="cfg-crons"><div class="cron-empty">—</div></div>
+                <div class="cron-add">
+                    <input class="control-input" id="cfg-cron-sched" placeholder="0 9 * * 1-5">
+                    <input class="control-input" id="cfg-cron-instr" placeholder="What to do when it fires (be self-contained)">
+                    <button class="btn btn-secondary" type="button" onclick="addAgentCron()">Add</button>
+                </div>
+                <div style="font-size:10px;color:var(--text-muted);line-height:1.5;margin-top:6px">5-field cron (<code>min hour day month weekday</code>), a macro (<code>@hourly @daily @weekly @monthly</code>), or an interval (<code>@every 30m</code>, <code>@every 2h</code>). Server local time. Agents can also self-schedule via the <code>schedule_wakeup</code> tool.</div>
+            </div>
             <div class="control-group" style="margin-top:12px"><span class="control-label">📊 Live telemetry (read-only)</span><div id="cfg-telemetry" class="cfg-telemetry">No turn run yet.</div></div>
             <div class="control-group"><span class="control-label">⌨️ Hermes CLI — run in terminal to configure this agent without the UI</span><div id="cfg-cli" class="cfg-cli">—</div></div>
         </div>
@@ -558,6 +585,15 @@ function handleWS(msg) {
             logEvent('system', `${payload.agent_name} config updated`);
             refreshData();
             break;
+        case 'cron_updated':
+        case 'cron_fired': {
+            if (type === 'cron_fired') logEvent('system', `${payload.agent_name} ⏰ scheduled wake-up fired (${payload.schedule || ''})`);
+            else refreshData();  // keep the card's ⏰ badge in sync
+            // Live-refresh the schedules list if this agent's config modal is open.
+            const cfgOpen = document.getElementById('modal-agent-config').classList.contains('show');
+            if (cfgOpen && document.getElementById('cfg-agent-id').value === payload.agent_name) loadAgentCrons(payload.agent_name);
+            break;
+        }
         case 'model_default_updated':
             logEvent('system', `Default model → ${payload.provider}/${payload.model}`);
             modelsCache = [];
@@ -624,7 +660,7 @@ function renderAgents() {
             : '';
         return `<div class="agent-card ${st} ${sel?'selected':''}" onclick="selectAgent('${jsAttr(n)}')">
             <div class="agent-name"><span class="status-dot ${st}"></span>${esc(a.config?.name || n)}</div>
-            <div class="agent-meta"><span>Queue: <span class="queue-badge">${a.pending_count || 0}</span></span><span class="peer-tag" style="background:rgba(167,139,250,0.14);color:var(--tool)" title="Model">${esc(a.config?.model || 'litellm-model')}</span>${a.config?.autonomous ? '<span class="peer-tag" style="background:rgba(245,181,68,0.16);color:var(--busy)" title="Self-drives when idle">auto</span>' : ''}</div>
+            <div class="agent-meta"><span>Queue: <span class="queue-badge">${a.pending_count || 0}</span></span><span class="peer-tag" style="background:rgba(167,139,250,0.14);color:var(--tool)" title="Model">${esc(a.config?.model || 'litellm-model')}</span>${a.config?.autonomous ? '<span class="peer-tag" style="background:rgba(245,181,68,0.16);color:var(--busy)" title="Self-drives when idle">auto</span>' : ''}${(() => { const cr = (a.config?.crons || []).filter(c => c.enabled !== false).length; return cr ? `<span class="peer-tag" style="background:rgba(62,207,142,0.14);color:var(--idle)" title="${cr} scheduled wake-up(s)">⏰ ${cr}</span>` : ''; })()}</div>
             ${ctxBar}
             <div class="agent-meta" style="margin-top:4px">${peerTags}</div>
             <div class="agent-actions">
@@ -915,6 +951,7 @@ async function showAgentConfig(name) {
         modelSel.value = cfg.model || '';   // empty = inherit the swarm default
         document.getElementById('cfg-autonomous').checked = !!cfg.autonomous;
         document.getElementById('cfg-sweep').value = cfg.sweep_interval ?? '';
+        document.getElementById('cfg-heartbeat').value = cfg.heartbeat_seconds ?? '';
         document.getElementById('cfg-reasoning').value = cfg.reasoning_effort || '';
         document.getElementById('cfg-temp').value = (cfg.temperature ?? '') === '' ? '' : cfg.temperature;
         document.getElementById('cfg-maxtok').value = cfg.max_tokens ?? '';
@@ -927,6 +964,9 @@ async function showAgentConfig(name) {
         renderTelemetry(cfg.telemetry || (agentData[name] && agentData[name].telemetry) || {});
         loadToolsets();
         loadAgentCli(name);
+        document.getElementById('cfg-cron-sched').value = '';
+        document.getElementById('cfg-cron-instr').value = '';
+        loadAgentCrons(name);
         document.getElementById('modal-agent-config').classList.add('show');
     } catch (e) { logEvent('error', e.message); }
 }
@@ -981,6 +1021,88 @@ function copyText(elm, text) {
     catch (e) { logEvent('error', 'Copy failed'); }
 }
 
+/* ===== CRON WAKE-UPS ===== */
+function fmtCronTime(ts) {
+    if (!ts) return '—';
+    try { return new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+    catch (e) { return '—'; }
+}
+
+async function loadAgentCrons(name) {
+    const el = document.getElementById('cfg-crons');
+    if (el) el.innerHTML = '<div class="cron-empty">Loading…</div>';
+    try {
+        const d = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/crons`).then(r => r.json());
+        renderCrons(name, d.crons || []);
+    } catch (e) { if (el) el.innerHTML = '<div class="cron-empty">Could not load schedules.</div>'; }
+}
+
+function renderCrons(name, crons) {
+    const el = document.getElementById('cfg-crons');
+    if (!el) return;
+    if (!crons.length) { el.innerHTML = '<div class="cron-empty">No scheduled wake-ups yet.</div>'; return; }
+    el.innerHTML = crons.map(c => {
+        const enabled = c.enabled !== false;
+        const cid = JSON.stringify(c.id).replace(/"/g, '&quot;');
+        const nm = JSON.stringify(name).replace(/"/g, '&quot;');
+        const next = enabled ? `Next: ${fmtCronTime(c.next_fire_at)}` : 'Disabled';
+        const last = c.last_fired_at ? ` · Last: ${fmtCronTime(c.last_fired_at)}` : '';
+        return `<div class="cron-row ${enabled ? '' : 'disabled'}">
+            <div class="cron-main">
+                <span class="cron-sched">${esc(c.schedule)}</span> <span class="cron-desc">${esc(c.describe || '')}</span>
+                <div class="cron-instr">${esc(c.instruction || '')}</div>
+                <div class="cron-next">${esc(next)}${esc(last)}${c.created_by === 'agent' ? ' · self-scheduled' : ''}</div>
+            </div>
+            <div class="cron-actions">
+                <label class="cfg-check" title="Enable / disable"><input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleAgentCron(${nm}, ${cid}, this.checked)"></label>
+                <span class="cron-del" title="Delete" onclick="deleteAgentCron(${nm}, ${cid})">🗑</span>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function addAgentCron() {
+    const name = document.getElementById('cfg-agent-id').value;
+    if (!name) return;
+    const schedule = document.getElementById('cfg-cron-sched').value.trim();
+    const instruction = document.getElementById('cfg-cron-instr').value.trim();
+    if (!schedule || !instruction) { logEvent('error', 'A wake-up needs both a schedule and an instruction.'); return; }
+    try {
+        const res = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/crons`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ schedule, instruction }),
+        });
+        const data = await res.json();
+        if (data.error) { logEvent('error', data.error); return; }
+        document.getElementById('cfg-cron-sched').value = '';
+        document.getElementById('cfg-cron-instr').value = '';
+        logEvent('system', `${name}: scheduled wake-up '${schedule}'`);
+        loadAgentCrons(name);
+    } catch (e) { logEvent('error', e.message); }
+}
+
+async function toggleAgentCron(name, cronId, enabled) {
+    try {
+        const res = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/crons/${encodeURIComponent(cronId)}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+        });
+        const data = await res.json();
+        if (data.error) { logEvent('error', data.error); }
+    } catch (e) { logEvent('error', e.message); }
+    loadAgentCrons(name);
+}
+
+async function deleteAgentCron(name, cronId) {
+    try {
+        const res = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/crons/${encodeURIComponent(cronId)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.error) { logEvent('error', data.error); return; }
+        logEvent('system', `${name}: wake-up deleted`);
+        loadAgentCrons(name);
+    } catch (e) { logEvent('error', e.message); }
+}
+
 async function saveAgentConfig() {
     const name = document.getElementById('cfg-agent-id').value;
     if (!name) return;
@@ -989,6 +1111,7 @@ async function saveAgentConfig() {
         model: document.getElementById('cfg-model').value,
         autonomous: document.getElementById('cfg-autonomous').checked,
         sweep_interval: document.getElementById('cfg-sweep').value.trim(),
+        heartbeat_seconds: document.getElementById('cfg-heartbeat').value.trim(),
         reasoning_effort: document.getElementById('cfg-reasoning').value,
         temperature: document.getElementById('cfg-temp').value.trim(),
         max_tokens: document.getElementById('cfg-maxtok').value.trim(),
