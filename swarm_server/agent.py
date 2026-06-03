@@ -21,6 +21,9 @@ from swarm_server.config import (
     LLM_ERROR_EMIT_THROTTLE_SECONDS,
     MAX_BATCH_SIZE,
     MAX_TASK_RETRIES,
+    SUPERVISOR_FEED_CHAR_CAP,
+    SUPERVISOR_FEED_PROMPT,
+    SUPERVISOR_TOKEN_THRESHOLD,
     SWEEP_INTERVAL_SECONDS,
     _derive_workspace_path,
     compose_agent_soul,
@@ -173,6 +176,11 @@ class AgentDaemon:
         # Hash of the last injected system context we logged, so we record it to
         # the transcript only when it actually changes (not on every turn).
         self._last_sysctx_hash: Optional[int] = None
+        # Supervisor agents only: per-linked-peer high-water mark (last monitoring
+        # message id already fed for review). Lazy-initialized to the peer's
+        # current latest id, so a supervisor reviews NEW activity only and never
+        # gets a peer's entire backlog dumped into its queue at once.
+        self._sup_watermark: Dict[str, int] = {}
 
     @staticmethod
     def _resolve_sweep_interval(cfg: Dict[str, Any]) -> float:
@@ -713,6 +721,7 @@ class AgentDaemon:
             await self._sweep()
             self._maybe_fire_crons()
             self._maybe_autonomous_heartbeat()
+            self._maybe_feed_supervisor()
 
     async def _sweep(self):
         # Claim a bounded batch first. If there's nothing to do, stay idle
@@ -780,6 +789,78 @@ class AgentDaemon:
             time=datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
         )
         self.ingest_task("autonomous", prompt)
+
+    def _supervisor_threshold(self) -> int:
+        """New-token threshold before a linked peer's activity is fed for review."""
+        try:
+            v = int(self.cfg.get("supervisor_token_threshold") or 0)
+            return v if v > 0 else SUPERVISOR_TOKEN_THRESHOLD
+        except (TypeError, ValueError):
+            return SUPERVISOR_TOKEN_THRESHOLD
+
+    def _render_feed_transcript(self, msgs: List[Dict[str, Any]]) -> str:
+        """Render a peer's new messages oldest-first, capped to the most-recent
+        slice (a marker notes any truncation — no silent loss)."""
+        lines = []
+        for m in msgs:
+            role = (m.get("role") or "?").upper()
+            content = (m.get("content") or "").strip()
+            if content:
+                lines.append(f"[{role}] {content}")
+        text = "\n\n".join(lines)
+        if len(text) > SUPERVISOR_FEED_CHAR_CAP:
+            text = ("[…older activity in this window truncated…]\n\n"
+                    + text[-SUPERVISOR_FEED_CHAR_CAP:])
+        return text
+
+    def _maybe_feed_supervisor(self) -> None:
+        """Supervisor agents only: push each linked peer's recent transcript into
+        THIS agent's own queue once the peer accrues enough new activity.
+
+        Daemon-side and automatic — the supervisor never calls a tool to fetch;
+        the review simply arrives as a queued task, like any peer message. One
+        feed per tick (others follow on later ticks) and only while not busy /
+        not backed up, so reviews don't pile up.
+        """
+        if not self.cfg.get("is_supervisor") or self._stop_requested:
+            return
+        if self.state == AGENT_STATE_BUSY:
+            return
+        try:
+            if self.queue.get_pending_count() > 0:
+                return  # already has a review (or other task) queued — wait
+        except Exception:
+            return
+        peers = self.cfg.get("allowed_peers") or []
+        threshold = self._supervisor_threshold()
+        for peer in peers:
+            try:
+                wm = self._sup_watermark.get(peer)
+                activity = monitor_db.get_new_activity(peer, wm or 0)
+                if wm is None:
+                    # First time watching this peer — start from "now" so we don't
+                    # dump its whole history; review only what happens next.
+                    self._sup_watermark[peer] = activity["max_id"]
+                    continue
+                if activity["count"] <= 0 or activity["tokens"] < threshold:
+                    continue
+                msgs = monitor_db.get_messages_since(peer, wm)
+                if not msgs:
+                    continue
+                max_id = max(int(m["id"]) for m in msgs)
+                transcript = self._render_feed_transcript(msgs)
+                prompt = SUPERVISOR_FEED_PROMPT.format(
+                    peer=peer, tokens=activity["tokens"], transcript=transcript
+                )
+                self._sup_watermark[peer] = max_id
+                monitor_db.log_event(
+                    self.name, "supervisor_feed", to_agent=peer,
+                    data={"tokens": activity["tokens"], "messages": len(msgs)},
+                )
+                self.ingest_task("supervisor-feed", prompt)
+                return  # one review per tick — keep the supervisor focused
+            except Exception as e:
+                log.debug("[%s] supervisor feed for %s failed: %s", self.name, peer, e)
 
     def _maybe_fire_crons(self) -> None:
         """Inject the instruction of any cron wake-up whose time has come.

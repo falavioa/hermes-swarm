@@ -373,6 +373,7 @@ async def add_agent(request: Request):
     team_id = body.get("team_id", "").strip()
     allowed_peers = body.get("allowed_peers", [])
     role_soul = body.get("role_soul") or body.get("soul")  # accept both for backward compat
+    is_supervisor = bool(body.get("is_supervisor"))
 
     if not agent_name or not display_name or not team_id:
         return JSONResponse(
@@ -392,6 +393,7 @@ async def add_agent(request: Request):
             display_name=display_name,
             allowed_peers=allowed_peers,
             role_soul=role_soul,
+            is_supervisor=is_supervisor,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
@@ -523,11 +525,12 @@ _EDITABLE_AGENT_FIELDS = {
     "name", "model", "provider", "autonomous", "sweep_interval", "heartbeat_seconds",
     "temperature", "max_tokens", "reasoning_effort", "max_iterations",
     "enabled_toolsets", "disabled_toolsets", "compression_threshold", "role_soul",
+    "is_supervisor", "supervisor_token_threshold",
 }
 # Numeric fields where an empty value means "clear → use the default".
 _NUMERIC_CLEARABLE = (
     "sweep_interval", "heartbeat_seconds", "temperature", "max_tokens",
-    "max_iterations", "compression_threshold",
+    "max_iterations", "compression_threshold", "supervisor_token_threshold",
 )
 
 
@@ -557,7 +560,7 @@ def _apply_config_fields(base: Dict[str, Any], body: Dict[str, Any]) -> Dict[str
             if not val:
                 updated.pop(key, None)
                 continue
-        if key == "autonomous":
+        if key in ("autonomous", "is_supervisor"):
             val = bool(val)
         updated[key] = val
     return updated
@@ -669,6 +672,8 @@ async def get_agent_config(agent_name: str):
         "compression_threshold": a.get("compression_threshold"),
         "role_soul": a.get("role_soul") or a.get("soul") or "",
         "allowed_peers": a.get("allowed_peers", []),
+        "is_supervisor": bool(a.get("is_supervisor", False)),
+        "supervisor_token_threshold": a.get("supervisor_token_threshold"),
         "hermes_home": str(getattr(daemon, "_hermes_home", "")) if daemon else "",
         "telemetry": telemetry,
     })

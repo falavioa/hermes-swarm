@@ -375,6 +375,47 @@ DIGEST_INPUT_CHAR_CAP = int(os.environ.get("SWARM_DIGEST_INPUT_CHAR_CAP", "24000
 # Master on/off; overridable live from the UI (global "settings" block).
 DIGEST_ENABLED_DEFAULT = os.environ.get("SWARM_DIGEST_ENABLED", "1") not in ("0", "false", "False", "")
 
+# ---------------------------------------------------------------------------
+# Supervisor agents (Layer 4 observability)
+# ---------------------------------------------------------------------------
+# A supervisor is an ordinary Hermes agent flagged is_supervisor and LINKED to
+# the agents it watches (its allowed_peers). Its one extra behavior is push, not
+# pull: the daemon watches each linked peer's transcript and, once a peer accrues
+# SUPERVISOR_TOKEN_THRESHOLD new tokens since the supervisor last saw it, drops
+# that peer's recent conversation into the supervisor's OWN queue as a task. The
+# supervisor then runs a normal turn and, if the peer is drifting/stuck/looping,
+# steers it with the existing send_peer_message tool. There is NO tool to call —
+# the review is delivered automatically, exactly like any queued message.
+SUPERVISOR_TOKEN_THRESHOLD = int(os.environ.get("SWARM_SUPERVISOR_TOKEN_THRESHOLD", "6000"))
+# Cap the transcript fed in one review so a big burst can't blow the supervisor's
+# own context; keep the most-recent slice and note any truncation.
+SUPERVISOR_FEED_CHAR_CAP = int(os.environ.get("SWARM_SUPERVISOR_FEED_CHAR_CAP", "24000"))
+
+# Wraps the linked peer's recent transcript when it's enqueued for review.
+SUPERVISOR_FEED_PROMPT = (
+    "[SUPERVISOR REVIEW — automated; the activity below was delivered to your "
+    "queue because '{peer}' produced ~{tokens} new tokens since your last review]\n"
+    "Read {peer}'s recent conversation below. If it is drifting off-mission, "
+    "stuck, looping, repeating errors, or needs course-correction, steer it with a "
+    "short, specific send_peer_message('{peer}', ...). If everything looks healthy, "
+    "just call log_changes with a one-line note and end. Intervene sparingly — only "
+    "when it genuinely helps.\n\n"
+    "--- {peer} · recent conversation ---\n{transcript}"
+)
+
+# Default identity for an agent created as a supervisor (used when the operator
+# doesn't supply their own role_soul).
+SUPERVISOR_DEFAULT_SOUL = (
+    "You are a SUPERVISOR agent. You do NOT do project work yourself. You watch the "
+    "agents you are linked to: their recent conversation is delivered to your queue "
+    "automatically as they make progress (you do not fetch it). Read each review and "
+    "decide whether the agent is on track. If it is drifting off-mission, stuck, "
+    "looping, repeating errors, or about to waste effort, steer it with a short, "
+    "specific send_peer_message to that agent. If all is well, record a brief "
+    "log_changes note and end your turn. Be sparing and high-signal — a good "
+    "supervisor intervenes rarely but decisively."
+)
+
 # Human-inbox registry cap (in-memory) — drop oldest resolved questions past this.
 MAX_PENDING_QUESTIONS = 500
 
@@ -1138,19 +1179,24 @@ def create_agent(
     display_name: str,
     allowed_peers: Optional[List[str]] = None,
     role_soul: Optional[str] = None,
+    is_supervisor: bool = False,
 ) -> Dict[str, Any]:
     if name in cfg["agents"]:
         raise ValueError(f"Agent '{name}' already exists")
     if team_id not in cfg["teams"]:
         raise ValueError(f"Team '{team_id}' does not exist")
 
+    # A supervisor with no custom soul gets the default supervisor identity.
+    default_soul = SUPERVISOR_DEFAULT_SOUL if is_supervisor else f"You are the {display_name}."
     agent_cfg = {
         "team_id": team_id,
         "name": display_name,
         "session_id": f"{name}-master-session-v1",
         "allowed_peers": list(allowed_peers or []),
-        "role_soul": role_soul or f"You are the {display_name}.",
+        "role_soul": role_soul or default_soul,
     }
+    if is_supervisor:
+        agent_cfg["is_supervisor"] = True
     cfg["agents"][name] = agent_cfg
     # Prepare workspace dirs
     ws = _derive_workspace_path(team_id, name)

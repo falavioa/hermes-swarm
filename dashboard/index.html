@@ -397,7 +397,9 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
         <div class="modal-body">
             <div class="control-group"><span class="control-label">Agent ID (slug)</span><input class="control-input" id="add-agent-id" placeholder="e.g., researcher_2"></div>
             <div class="control-group"><span class="control-label">Display Name</span><input class="control-input" id="add-agent-name" placeholder="e.g., Researcher Agent 2"></div>
-            <div class="control-group"><span class="control-label">Allowed Peers (comma-separated)</span><input class="control-input" id="add-agent-peers" placeholder="editor, reviewer"></div>
+            <div class="control-group"><span class="control-label">Allowed Peers / Watched agents (comma-separated)</span><input class="control-input" id="add-agent-peers" placeholder="editor, reviewer"></div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);cursor:pointer;margin:2px 0 8px"><input type="checkbox" id="add-agent-supervisor" onchange="onSupervisorToggle()"> 👁 Supervisor agent</label>
+            <div id="add-agent-supervisor-hint" style="display:none;font-size:11px;color:var(--text-muted);line-height:1.5;margin:-4px 0 8px">A supervisor watches the agents above (its peers): their recent conversation is fed into its queue automatically as they work, and it can steer them with peer messages. Leave its Role Soul blank to use the default supervisor brief.</div>
             <div class="control-group"><span class="control-label">Role Soul (your prompt)</span><textarea class="control-textarea" id="add-agent-soul" placeholder="Describe this agent's responsibilities, expertise, and behavior..."></textarea></div>
         </div>
         <div class="modal-footer">
@@ -750,7 +752,7 @@ function renderAgents() {
             : '';
         return `<div class="agent-card ${st} ${sel?'selected':''}" onclick="selectAgent('${jsAttr(n)}')">
             <div class="agent-name"><span class="status-dot ${st}"></span>${esc(a.config?.name || n)}</div>
-            <div class="agent-meta"><span>Queue: <span class="queue-badge">${a.pending_count || 0}</span></span><span class="peer-tag" style="background:rgba(167,139,250,0.14);color:var(--tool)" title="Model">${esc(a.config?.model || 'litellm-model')}</span>${a.config?.autonomous ? '<span class="peer-tag" style="background:rgba(245,181,68,0.16);color:var(--busy)" title="Self-drives when idle">auto</span>' : ''}${(() => { const cr = (a.config?.crons || []).filter(c => c.enabled !== false).length; return cr ? `<span class="peer-tag" style="background:rgba(62,207,142,0.14);color:var(--idle)" title="${cr} scheduled wake-up(s)">⏰ ${cr}</span>` : ''; })()}</div>
+            <div class="agent-meta"><span>Queue: <span class="queue-badge">${a.pending_count || 0}</span></span><span class="peer-tag" style="background:rgba(167,139,250,0.14);color:var(--tool)" title="Model">${esc(a.config?.model || 'litellm-model')}</span>${a.config?.autonomous ? '<span class="peer-tag" style="background:rgba(245,181,68,0.16);color:var(--busy)" title="Self-drives when idle">auto</span>' : ''}${a.config?.is_supervisor ? '<span class="peer-tag" style="background:rgba(91,157,255,0.16);color:var(--human)" title="Supervisor — watches its linked agents">👁 supervisor</span>' : ''}${(() => { const cr = (a.config?.crons || []).filter(c => c.enabled !== false).length; return cr ? `<span class="peer-tag" style="background:rgba(62,207,142,0.14);color:var(--idle)" title="${cr} scheduled wake-up(s)">⏰ ${cr}</span>` : ''; })()}</div>
             ${ctxBar}
             ${renderCardDigest(a.digest)}
             <div class="agent-meta" style="margin-top:4px">${peerTags}</div>
@@ -1587,23 +1589,31 @@ async function doAddTeam() {
     } catch (e) { logEvent('error', e.message); }
 }
 
+function onSupervisorToggle() {
+    const on = document.getElementById('add-agent-supervisor').checked;
+    document.getElementById('add-agent-supervisor-hint').style.display = on ? '' : 'none';
+}
+
 async function doAddAgent() {
     const id = document.getElementById('add-agent-id').value.trim();
     const name = document.getElementById('add-agent-name').value.trim();
     const peersRaw = document.getElementById('add-agent-peers').value.trim();
     const role_soul = document.getElementById('add-agent-soul').value.trim();
+    const isSupervisor = document.getElementById('add-agent-supervisor').checked;
     const peers = peersRaw ? peersRaw.split(',').map(p => p.trim()).filter(Boolean) : [];
     if (!id || !name || !currentTeam) return;
     try {
-        const res = await fetch(`${API_URL}/agent`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({agent_name: id, name, team_id: currentTeam, allowed_peers: peers, role_soul: role_soul || undefined}) });
+        const res = await fetch(`${API_URL}/agent`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({agent_name: id, name, team_id: currentTeam, allowed_peers: peers, role_soul: role_soul || undefined, is_supervisor: isSupervisor}) });
         const data = await res.json();
         if (data.error) { logEvent('error', data.error); return; }
-        logEvent('system', `Agent created: ${id}`);
+        logEvent('system', `${isSupervisor ? 'Supervisor' : 'Agent'} created: ${id}`);
         hideModal('modal-add-agent');
         document.getElementById('add-agent-id').value = '';
         document.getElementById('add-agent-name').value = '';
         document.getElementById('add-agent-peers').value = '';
         document.getElementById('add-agent-soul').value = '';
+        document.getElementById('add-agent-supervisor').checked = false;
+        onSupervisorToggle();
         refreshData();
         loadTeams();
     } catch (e) { logEvent('error', e.message); }
