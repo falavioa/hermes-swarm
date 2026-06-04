@@ -1,0 +1,273 @@
+"""crawl4ai-backed web_search + web_extract handlers, with ddgs / httpx fallback.
+
+These replace Hermes' built-in `web_search` and `web_extract` tool handlers so
+EVERY agent (current and future) uses crawl4ai as the primary web search + fetch
+engine, falling back to ddgs (search) / httpx (fetch) only when crawl4ai fails.
+
+The override is installed from swarm_server.tools._register_custom_tools() via
+install_crawl4ai_web_tools(), which re-registers the existing tool names with
+registry.register(..., override=True) so the schema/interface agents see is
+unchanged — only the implementation swaps.
+
+Handlers are SYNC and run the async crawl4ai code in a FRESH event loop on a
+dedicated thread, so they work no matter what loop/thread context Hermes invokes
+them from (verified: Playwright launches fine off the main thread with a fresh
+asyncio.run loop).
+"""
+import asyncio
+import contextlib
+import io
+import json
+import logging
+import re
+import threading
+import urllib.parse
+
+log = logging.getLogger(__name__)
+
+_FETCH_TIMEOUT = 60
+_SEARCH_TIMEOUT = 45
+_MAX_CONTENT_CHARS = 100_000
+
+
+def _run_async(coro, timeout):
+    """Run a coroutine to completion in a fresh event loop on a dedicated thread.
+
+    Robust against being called from a thread that already owns a running loop
+    (which would make asyncio.run raise). crawl4ai/Playwright tolerate a fresh
+    loop on a non-main thread.
+    """
+    box = {}
+
+    def _runner():
+        try:
+            # crawl4ai is chatty on stdout; keep the server log clean.
+            with contextlib.redirect_stdout(io.StringIO()):
+                box["value"] = asyncio.run(coro)
+        except Exception as exc:  # noqa: BLE001 - surfaced to caller
+            box["error"] = exc
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        raise TimeoutError(f"crawl4ai operation exceeded {timeout}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+# --------------------------------------------------------------------------- #
+# crawl4ai primitives
+# --------------------------------------------------------------------------- #
+async def _c4a_fetch(url: str) -> str:
+    from crawl4ai import AsyncWebCrawler
+
+    async with AsyncWebCrawler(verbose=False) as crawler:
+        res = await crawler.arun(url=url)
+        if not res.success:
+            raise RuntimeError(
+                f"crawl4ai fetch failed: {getattr(res, 'error_message', 'unknown')}"
+            )
+        return res.markdown or ""
+
+
+_RESULT_A_RE = re.compile(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.S)
+_SNIPPET_RE = re.compile(r'class="result__snippet"[^>]*>(.*?)</a>', re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip(html: str) -> str:
+    return _TAG_RE.sub("", html or "").strip()
+
+
+async def _c4a_search(query: str, limit: int):
+    """Primary search: fetch the DuckDuckGo HTML SERP via crawl4ai and parse
+    organic result anchors (decoding DDG's uddg redirect, dropping ads)."""
+    from crawl4ai import AsyncWebCrawler
+
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+    async with AsyncWebCrawler(verbose=False) as crawler:
+        res = await crawler.arun(url=url)
+    html = res.html or ""
+
+    results = []
+    for m in _RESULT_A_RE.finditer(html):
+        href, title = m.group(1), _strip(m.group(2))
+        parsed = urllib.parse.urlparse(href if href.startswith("http") else "https:" + href)
+        uddg = urllib.parse.parse_qs(parsed.query).get("uddg", [None])[0]
+        real = uddg or href
+        if not real:
+            continue
+        if "duckduckgo.com/y.js" in real or "ad_provider=" in real:  # paid ad slot
+            continue
+        results.append({"title": title, "url": real})
+        if len(results) >= limit:
+            break
+
+    snippets = [_strip(s)[:300] for s in _SNIPPET_RE.findall(html)]
+    for i, snip in enumerate(snippets[: len(results)]):
+        results[i]["snippet"] = snip
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# fallbacks
+# --------------------------------------------------------------------------- #
+def _ddgs_search(query: str, limit: int):
+    from ddgs import DDGS
+
+    out = []
+    for r in DDGS().text(query, max_results=limit):
+        out.append(
+            {
+                "title": r.get("title", ""),
+                "url": r.get("href", "") or r.get("url", ""),
+                "snippet": (r.get("body", "") or "")[:300],
+            }
+        )
+    return out
+
+
+def _httpx_fetch(url: str) -> str:
+    import httpx
+
+    r = httpx.get(
+        url,
+        timeout=30,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; SwarmBot/1.0)"},
+    )
+    r.raise_for_status()
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", r.text, flags=re.S | re.I)
+    return re.sub(r"\s+", " ", _TAG_RE.sub(" ", text)).strip()
+
+
+# --------------------------------------------------------------------------- #
+# tool handlers  (sync, return JSON string)
+# --------------------------------------------------------------------------- #
+def web_search_handler(args: dict, **kwargs) -> str:
+    query = (args.get("query") or "").strip()
+    try:
+        limit = max(1, min(int(args.get("limit") or 5), 15))
+    except (TypeError, ValueError):
+        limit = 5
+    if not query:
+        return json.dumps({"error": "query is required"})
+
+    provider, results = "crawl4ai", []
+    try:
+        results = _run_async(_c4a_search(query, limit), _SEARCH_TIMEOUT) or []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[web_search] crawl4ai failed (%s) — falling back to ddgs", exc)
+
+    if not results:
+        try:
+            results = _ddgs_search(query, limit)
+            provider = "ddgs(backup)"
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps(
+                {"error": f"crawl4ai and ddgs both failed: {exc}", "query": query}
+            )
+
+    return json.dumps(
+        {"provider": provider, "query": query, "count": len(results), "results": results},
+        ensure_ascii=False,
+    )
+
+
+def web_extract_handler(args: dict, **kwargs) -> str:
+    urls = args.get("urls")
+    if isinstance(urls, str):
+        urls = [urls]
+    urls = [u for u in (urls or []) if u][:5]
+    if not urls:
+        return json.dumps({"error": "urls (a list of URLs) is required"})
+
+    out = []
+    for url in urls:
+        provider, content, err = "crawl4ai", None, None
+        try:
+            content = _run_async(_c4a_fetch(url), _FETCH_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[web_extract] crawl4ai failed for %s (%s) — httpx fallback", url, exc)
+            try:
+                content = _httpx_fetch(url)
+                provider = "httpx(backup)"
+            except Exception as exc2:  # noqa: BLE001
+                err = f"crawl4ai: {exc} | httpx: {exc2}"
+        item = {"url": url, "provider": provider}
+        if err:
+            item["error"] = err
+        else:
+            item["content"] = (content or "")[:_MAX_CONTENT_CHARS]
+        out.append(item)
+
+    return json.dumps({"results": out}, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- #
+# installer — called from _register_custom_tools()
+# --------------------------------------------------------------------------- #
+_INSTALLED = False
+
+
+def install_crawl4ai_web_tools(registry) -> bool:
+    """Override built-in web_search / web_extract handlers with crawl4ai-backed
+    ones, reusing the existing schemas so the agent-facing interface is identical.
+    Idempotent. Returns True if the override is in place."""
+    global _INSTALLED
+    if _INSTALLED:
+        return True
+    overrides = (("web_search", web_search_handler), ("web_extract", web_extract_handler))
+    installed_any = False
+    for name, handler in overrides:
+        schema = registry.get_schema(name)
+        if not schema:
+            # Built-in web toolset not present in this build; define a minimal schema.
+            if name == "web_search":
+                schema = {
+                    "name": "web_search",
+                    "description": "Search the web and return ranked results (title, url, snippet).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The search query."},
+                            "limit": {"type": "integer", "description": "Max results (default 5)."},
+                        },
+                        "required": ["query"],
+                    },
+                }
+            else:
+                schema = {
+                    "name": "web_extract",
+                    "description": "Fetch one or more URLs and return their content as clean markdown.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "urls": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "URLs to fetch (max 5).",
+                            }
+                        },
+                        "required": ["urls"],
+                    },
+                }
+        try:
+            registry.register(
+                name=name,
+                toolset="web",
+                schema=schema,
+                handler=handler,
+                is_async=False,
+                override=True,
+                max_result_size_chars=_MAX_CONTENT_CHARS,
+                description=schema.get("description", ""),
+            )
+            installed_any = True
+            log.info("[web_crawl4ai] Overrode '%s' with crawl4ai-backed handler", name)
+        except Exception as exc:  # noqa: BLE001
+            log.error("[web_crawl4ai] Failed to override '%s': %s", name, exc)
+    _INSTALLED = installed_any
+    return installed_any

@@ -1087,5 +1087,15 @@ def _register_custom_tools():
                 description="Lift a pause on an agent once it's safe to continue.",
             )
             log.info("[resume_agent] Registered")
+
+        # Override built-in web_search / web_extract with crawl4ai-backed
+        # handlers (ddgs / httpx fallback) so every agent uses crawl4ai as the
+        # primary web search + fetch engine. Reuses the existing schemas.
+        try:
+            from swarm_server.web_crawl4ai import install_crawl4ai_web_tools
+
+            install_crawl4ai_web_tools(registry)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[Custom Tools] crawl4ai web override skipped: %s", exc)
     except Exception as exc:
         log.warning("[Custom Tools] Could not register in Hermes registry: %s", exc)
