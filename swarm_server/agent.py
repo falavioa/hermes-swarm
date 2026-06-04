@@ -13,26 +13,28 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from swarm_server.config import (
-    AUTONOMOUS_HEARTBEAT_PROMPT,
     AUTONOMOUS_HEARTBEAT_SECONDS,
-    CRON_WAKEUP_PROMPT,
     LITELLM_API_BASE,
     LLM_API_KEY,
     LLM_ERROR_EMIT_THROTTLE_SECONDS,
     MAX_BATCH_SIZE,
     MAX_TASK_RETRIES,
     SUPERVISOR_FEED_CHAR_CAP,
-    SUPERVISOR_FEED_PROMPT,
     SUPERVISOR_TOKEN_THRESHOLD,
     SWEEP_INTERVAL_SECONDS,
     _derive_workspace_path,
     _ensure_project_dir,
-    compose_agent_soul,
-    compose_live_context,
-    compose_soul_identity,
     load_agents_config,
     save_agent_config,
     write_agent_hermes_config,
+)
+from swarm_server.prompts import (
+    AUTONOMOUS_HEARTBEAT_PROMPT,
+    CRON_WAKEUP_PROMPT,
+    SUPERVISOR_FEED_PROMPT,
+    compose_agent_soul,
+    compose_live_context,
+    compose_soul_identity,
 )
 from swarm_server.browser_pool import team_browser_manager
 from swarm_server.monitoring import monitor_db

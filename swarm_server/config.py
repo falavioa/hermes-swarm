@@ -278,21 +278,9 @@ COMPRESSION_HYGIENE_HARD_MESSAGE_LIMIT = 400
 # Override the interval at launch with SWARM_HEARTBEAT_SECONDS.
 AUTONOMOUS_HEARTBEAT_SECONDS = int(os.environ.get("SWARM_HEARTBEAT_SECONDS", "1800"))
 
-AUTONOMOUS_HEARTBEAT_PROMPT = (
-    "[AUTONOMOUS HEARTBEAT — no human task is queued; you run 24/7]\n"
-    "Current Time: {time}"
-)
-
-# Injected as a task when a per-agent cron wake-up fires (see AgentDaemon._maybe_fire_crons
-# and the schedule_wakeup tool). Unlike the heartbeat, a cron carries a SPECIFIC
-# instruction the agent (or operator) attached when scheduling it.
-CRON_WAKEUP_PROMPT = (
-    "[SCHEDULED WAKE-UP — cron '{schedule}' fired at {time}; you run 24/7 and "
-    "nobody may be watching]\n"
-    "This is an automated wake-up you or your operator scheduled. Carry out the "
-    "instruction below, then end your turn (do not loop):\n\n"
-    "{instruction}"
-)
+# Prompt/soul construction (AUTONOMOUS_HEARTBEAT_PROMPT, CRON_WAKEUP_PROMPT,
+# SUPERVISOR_FEED_PROMPT, SUPERVISOR_DEFAULT_SOUL, compose_* / _build_* helpers)
+# lives in swarm_server/prompts.py — the single home for prompt text + assembly.
 
 # ---------------------------------------------------------------------------
 # Tool output caps — bound a single tool result's size in the conversation.
@@ -390,31 +378,7 @@ SUPERVISOR_TOKEN_THRESHOLD = int(os.environ.get("SWARM_SUPERVISOR_TOKEN_THRESHOL
 # Cap the transcript fed in one review so a big burst can't blow the supervisor's
 # own context; keep the most-recent slice and note any truncation.
 SUPERVISOR_FEED_CHAR_CAP = int(os.environ.get("SWARM_SUPERVISOR_FEED_CHAR_CAP", "24000"))
-
-# Wraps the linked peer's recent transcript when it's enqueued for review.
-SUPERVISOR_FEED_PROMPT = (
-    "[SUPERVISOR REVIEW — automated; the activity below was delivered to your "
-    "queue because '{peer}' produced ~{tokens} new tokens since your last review]\n"
-    "Read {peer}'s recent conversation below. If it is drifting off-mission, "
-    "stuck, looping, repeating errors, or needs course-correction, steer it with a "
-    "short, specific send_peer_message('{peer}', ...). If everything looks healthy, "
-    "just call log_changes with a one-line note and end. Intervene sparingly — only "
-    "when it genuinely helps.\n\n"
-    "--- {peer} · recent conversation ---\n{transcript}"
-)
-
-# Default identity for an agent created as a supervisor (used when the operator
-# doesn't supply their own role_soul).
-SUPERVISOR_DEFAULT_SOUL = (
-    "You are a SUPERVISOR agent. You do NOT do project work yourself. You watch the "
-    "agents you are linked to: their recent conversation is delivered to your queue "
-    "automatically as they make progress (you do not fetch it). Read each review and "
-    "decide whether the agent is on track. If it is drifting off-mission, stuck, "
-    "looping, repeating errors, or about to waste effort, steer it with a short, "
-    "specific send_peer_message to that agent. If all is well, record a brief "
-    "log_changes note and end your turn. Be sparing and high-signal — a good "
-    "supervisor intervenes rarely but decisively."
-)
+# SUPERVISOR_FEED_PROMPT and SUPERVISOR_DEFAULT_SOUL live in swarm_server/prompts.py.
 
 # Human-inbox registry cap (in-memory) — drop oldest resolved questions past this.
 MAX_PENDING_QUESTIONS = 500
@@ -436,11 +400,6 @@ CORS_ALLOWED_ORIGINS = [
 # Optional bearer token guarding mutating endpoints. Unset => auth disabled
 # (relies on localhost binding). Set SWARM_API_KEY to require it.
 SWARM_API_KEY = os.environ.get("SWARM_API_KEY", "").strip()
-# COMMON_SOUL_TEMPLATE lives in swarm_server/soul_template.py so the (long)
-# shared prompt prose can be edited independently of config logic.
-from swarm_server.soul_template import COMMON_SOUL_TEMPLATE  # noqa: E402
-
-
 # ---------------------------------------------------------------------------
 # New config schema helpers
 # ---------------------------------------------------------------------------
@@ -676,44 +635,6 @@ def write_agent_hermes_config(
         raise
 
 
-def _build_org_diagram(cfg: Dict[str, Any], team_id: str, current_agent: str) -> str:
-    """Build an ASCII org chart for all agents in the team."""
-    team_agents = {
-        name: a for name, a in cfg.get("agents", {}).items()
-        if a.get("team_id") == team_id
-    }
-    if not team_agents:
-        return "(no other team members)"
-
-    lines = []
-    for name, agent_cfg in sorted(team_agents.items()):
-        peers = agent_cfg.get("allowed_peers", [])
-        role = agent_cfg.get("role_soul", f"You are the {agent_cfg.get('name', name)}.").split('\n')[0]
-        is_you = " ← YOU" if name == current_agent else ""
-        peer_str = ", ".join(peers) if peers else "no links"
-        lines.append(f"  {name}: {role[:60]}{is_you}")
-        lines.append(f"    → links: {peer_str}")
-
-    return "\n".join(lines)
-
-
-def _build_team_members_list(cfg: Dict[str, Any], team_id: str) -> str:
-    """Build a list of all team members with their roles."""
-    team_agents = {
-        name: a for name, a in cfg.get("agents", {}).items()
-        if a.get("team_id") == team_id
-    }
-    if not team_agents:
-        return "(no other team members)"
-
-    lines = []
-    for name, agent_cfg in sorted(team_agents.items()):
-        role = agent_cfg.get("role_soul", f"You are the {agent_cfg.get('name', name)}.").split('\n')[0]
-        lines.append(f"  - {name}: {role}")
-
-    return "\n".join(lines)
-
-
 def _migrate_legacy_config(legacy: Dict[str, Any]) -> Dict[str, Any]:
     """Convert old flat agent config format -> new {teams, agents} format."""
     log.info("Migrating legacy flat agent config -> new teams schema")
@@ -801,282 +722,6 @@ def _default_config() -> Dict[str, Any]:
         },
         "agents": {},
     }
-
-
-# ---------------------------------------------------------------------------
-# Soul composition — combines common + role-specific parts
-# ---------------------------------------------------------------------------
-def compose_soul_identity(agent_cfg: Dict[str, Any]) -> str:
-    """Build the SOUL.md identity block for an agent.
-
-    This becomes the agent's PRIMARY identity, written to {HERMES_HOME}/SOUL.md
-    so Hermes loads it as the lead block of the (cached) system prompt — instead
-    of the generic auto-seeded "You are Hermes Agent…" template. The richer
-    operational framing (swarm rules, org chart, peers) stays in the ephemeral
-    prompt via compose_agent_soul(..., include_role=False); the role lives here
-    so it is the first thing the model reads and is cache-stable across turns.
-    """
-    agent_name = agent_cfg.get("name", "Agent")
-    agent_id = agent_cfg.get("agent_id", "unknown")
-    team_id = agent_cfg.get("team_id", "default")
-    role = agent_cfg.get("role_soul", f"You are the {agent_name}.")
-    return (
-        f"{role}\n\n"
-        f'You are "{agent_id}" ({agent_name}), one agent on the "{team_id}" team in an '
-        f"autonomous multi-agent swarm. Operate strictly in the role described above."
-    )
-
-
-def _read_workspace_brief(team_id: str, max_chars: int = 8000) -> str:
-    """Return the team's workspace.md text for inlining into the prompt.
-
-    Truncated defensively so an oversized brief can't blow up every turn's
-    token budget. Returns a friendly placeholder if the file is absent."""
-    try:
-        p = _get_team_workspace_path(team_id) / "workspace.md"
-        if not p.exists():
-            return "(no workspace.md yet — the team brief has not been written.)"
-        text = p.read_text(encoding="utf-8").strip()
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n…(brief truncated — read workspace.md on disk for the rest.)"
-        return text or "(workspace.md is empty.)"
-    except Exception as e:
-        return f"(could not read workspace.md: {e})"
-
-
-def _build_workspace_tree(team_id: str, max_entries: int = 160) -> str:
-    """A compact directory listing of the team's SHARED project dir, so each
-    agent can SEE what exists in the one shared repo without guessing paths.
-    Skips noise (.git, .hermes, caches, browser profile) and caps total lines so
-    a large repo can't dominate the prompt."""
-    import os
-    root = _get_project_dir(team_id)
-    if not root.exists():
-        return "(shared project not created yet.)"
-    SKIP = {".git", ".hermes", "__pycache__", "node_modules", ".browser-profile",
-            "context", ".DS_Store", "dist", "build", ".venv"}
-    lines: List[str] = []
-    truncated = False
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP)
-        rel = os.path.relpath(dirpath, root)
-        depth = 0 if rel == "." else rel.count(os.sep) + 1
-        if depth > 4:
-            dirnames[:] = []
-            continue
-        indent = "  " * depth
-        label = "." if rel == "." else os.path.basename(dirpath)
-        lines.append(f"{indent}{label}/")
-        for fn in sorted(filenames):
-            if fn.endswith((".pyc", ".db", ".db-shm", ".db-wal")) or fn == ".DS_Store":
-                continue
-            lines.append(f"{indent}  {fn}")
-            if len(lines) >= max_entries:
-                truncated = True
-                break
-        if truncated:
-            break
-    if truncated:
-        lines.append("…(tree truncated)")
-    return "\n".join(lines)
-
-
-def _recent_peer_messages(team_id: str, full_config: Optional[Dict[str, Any]], limit: int = 10) -> str:
-    """Render the last N send_peer_message events across the team, oldest→newest,
-    so every agent has shared awareness of recent team chatter."""
-    try:
-        from swarm_server.monitoring import monitor_db
-        # message_sent events aren't team-tagged, so scope by the team's agent set.
-        team_agents = set()
-        if full_config:
-            team_agents = {
-                aid for aid, a in (full_config.get("agents") or {}).items()
-                if a.get("team_id") == team_id
-            }
-        events = monitor_db.get_events(limit=200)  # newest first
-        msgs = []
-        for e in events:
-            if e.get("event_type") != "message_sent":
-                continue
-            frm, to = e.get("from_agent"), e.get("to_agent")
-            if team_agents and frm not in team_agents and to not in team_agents:
-                continue
-            preview = ""
-            try:
-                preview = (json.loads(e.get("data") or "{}") or {}).get("message_preview", "")
-            except Exception:
-                pass
-            msgs.append((e.get("timestamp", 0), frm, to, preview))
-            if len(msgs) >= limit:
-                break
-        if not msgs:
-            return "(no peer messages yet.)"
-        msgs.reverse()  # oldest → newest reads naturally
-        out = []
-        for ts, frm, to, preview in msgs:
-            stamp = ""
-            try:
-                from datetime import datetime
-                stamp = datetime.fromtimestamp(ts).strftime("%H:%M")
-            except Exception:
-                pass
-            out.append(f"  [{stamp}] {frm} → {to}: {preview}")
-        return "\n".join(out)
-    except Exception as e:
-        return f"(could not load peer messages: {e})"
-
-
-def _build_cron_summary(full_config: Optional[Dict[str, Any]], agent_id: str) -> str:
-    """One line per scheduled wake-up this agent currently has, for the prompt."""
-    if not full_config:
-        return "(unavailable)"
-    crons = (full_config.get("agents", {}).get(agent_id, {}) or {}).get("crons") or []
-    if not crons:
-        return "(none — you have no scheduled wake-ups)"
-    try:
-        from swarm_server.cron import cron_describe
-    except Exception:
-        cron_describe = lambda s: s  # noqa: E731
-    lines = []
-    for c in crons:
-        state = "enabled" if c.get("enabled", True) else "disabled"
-        instr = (c.get("instruction") or "").replace("\n", " ")
-        if len(instr) > 100:
-            instr = instr[:100] + "…"
-        lines.append(
-            f"- [{state}] {c.get('schedule')} ({cron_describe(c.get('schedule', ''))})"
-            f" → {instr}  (id={c.get('id')})"
-        )
-    return "\n".join(lines)
-
-
-def compose_live_context(
-    team_id: str,
-    agent_id: str,
-    full_config: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Dynamic, per-turn context appended to the ephemeral system prompt:
-    the live project directory tree and recent team messages. Rebuilt each
-    turn (cheap) and injected at API-call time, so it never pollutes the
-    cached/stored system prompt."""
-    try:
-        from datetime import datetime
-        now_line = datetime.now().astimezone().strftime("%A, %B %d, %Y %H:%M %Z")
-    except Exception:
-        now_line = "(unavailable)"
-
-    # Context-isolated agents (black-box tester) must not see the team's project
-    # tree or inter-agent chatter — only the time and their own cron schedule.
-    agent_cfg = ((full_config or {}).get("agents", {}) or {}).get(agent_id, {})
-    if agent_cfg.get("context_isolated"):
-        crons = _build_cron_summary(full_config, agent_id)
-        return (
-            "--- LIVE CONTEXT (auto-refreshed each turn) ---\n"
-            f"Current time: {now_line}\n\n"
-            "Your scheduled wake-ups (manage with schedule_wakeup / cancel_wakeup):\n"
-            f"{crons}\n"
-        )
-
-    tree = _build_workspace_tree(team_id)
-    recent = _recent_peer_messages(team_id, full_config, limit=10)
-    crons = _build_cron_summary(full_config, agent_id)
-    return (
-        "--- LIVE TEAM CONTEXT (auto-refreshed each turn) ---\n"
-        f"Current time: {now_line}\n\n"
-        "Shared project directory (every teammate works in this one tree — this is "
-        "what already exists; read any path here directly):\n"
-        f"{tree}\n\n"
-        "Last 10 messages between teammates (send_peer_message), oldest first:\n"
-        f"{recent}\n\n"
-        "Your scheduled cron wake-ups (manage with schedule_wakeup / cancel_wakeup):\n"
-        f"{crons}\n"
-    )
-
-
-def compose_agent_soul(
-    agent_cfg: Dict[str, Any],
-    full_config: Optional[Dict[str, Any]] = None,
-    include_role: bool = True,
-) -> str:
-    """Build the full ephemeral system prompt for an agent.
-
-    When include_role is False, the trailing "YOUR ROLE" block is omitted —
-    used when the role identity is instead written to SOUL.md (so it is not
-    duplicated in both the cached prompt and the ephemeral prompt).
-    """
-    agent_name = agent_cfg.get("name", "Agent")
-    team_id = agent_cfg.get("team_id", "default")
-    peers = agent_cfg.get("allowed_peers", [])
-    peers_str = ", ".join(peers) if peers else "(none — you cannot message any peers yet)"
-    # The shared work surface (all agents collaborate here) + the team metadata
-    # dir that holds the brief and changelog. No per-agent workspace folder.
-    project_dir = str(_get_project_dir(team_id, full_config))
-    team_workspace = str(_get_team_workspace_path(team_id))
-
-    # Build org diagram if we have full config
-    org_diagram = "(config not available for diagram)"
-    all_members = "(config not available for member list)"
-    if full_config:
-        org_diagram = _build_org_diagram(full_config, team_id, agent_cfg.get("agent_id", "unknown"))
-        all_members = _build_team_members_list(full_config, team_id)
-
-    # Context-isolated agents (e.g. a black-box QA tester) deliberately get NO
-    # product brief, roadmap, or org chart — they must discover the product fresh,
-    # as an outside customer would. They keep only the swarm mechanics + their role
-    # + the bare list of peers to report findings to.
-    isolated = bool(agent_cfg.get("context_isolated"))
-
-    # Inline the project brief (workspace.md) so it lives in the prompt itself
-    # rather than something the agent must remember to open. Read at compose time.
-    if isolated:
-        workspace_brief = (
-            "(You are an EXTERNAL BLACK-BOX TESTER. You are intentionally given NO "
-            "product brief, spec, roadmap, or internal/codebase knowledge. Do not ask "
-            "for it. Discover the product yourself by using the live site as a real "
-            "first-time customer would.)"
-        )
-    else:
-        workspace_brief = _read_workspace_brief(team_id)
-
-    common = COMMON_SOUL_TEMPLATE.format(
-        agent_name=agent_name,
-        team_id=team_id,
-        allowed_peers_list=peers_str,
-        sweep_interval=SWEEP_INTERVAL_SECONDS,
-        project_dir=project_dir,
-        team_workspace=team_workspace,
-        workspace_brief=workspace_brief,
-    )
-
-    if isolated:
-        body = (
-            f"{common}\n"
-            f"--- REPORTING ---\n"
-            f"You are not wired into the team's internal context and you do not see the "
-            f"org chart. When you find a bug, breakage, or confusing experience, report it "
-            f"via send_peer_message to: {peers_str}.\n"
-        )
-    else:
-        body = (
-            f"{common}\n"
-            f"--- TEAM ORGANIZATION ---\n"
-            f"Your team: {team_id}\n\n"
-            f"Agent connections and roles:\n"
-            f"{org_diagram}\n\n"
-            f"All team members:\n"
-            f"{all_members}\n"
-        )
-
-    if include_role:
-        role = agent_cfg.get("role_soul", f"You are the {agent_name}.")
-        body += (
-            f"\n{'=' * 60}\n"
-            f"YOUR ROLE\n"
-            f"{'=' * 60}\n"
-            f"{role}\n"
-        )
-
-    return body
 
 
 # ---------------------------------------------------------------------------
@@ -1281,6 +926,10 @@ def create_agent(
         raise ValueError(f"Team '{team_id}' does not exist")
 
     # A supervisor with no custom soul gets the default supervisor identity.
+    # Local import: prompt text lives in swarm_server.prompts, which imports
+    # path/config helpers from this module — a function-local import here keeps
+    # that one-directional (no config -> prompts top-level cycle).
+    from swarm_server.prompts import SUPERVISOR_DEFAULT_SOUL
     default_soul = SUPERVISOR_DEFAULT_SOUL if is_supervisor else f"You are the {display_name}."
     agent_cfg = {
         "team_id": team_id,
