@@ -584,9 +584,9 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
 
 
 def _request_human_takeover_handler(args: dict, **kwargs) -> str:
-    """Move the team browser onto the human's screen, block until they finish, then
-    send it back to the hidden display and resume. Mirrors ask_human's blocking but
-    brackets it with begin_takeover/end_takeover so the handoff is seamless."""
+    """Open the team browser as a real window on the human's screen, block until
+    they finish, then relaunch it headless and resume. Mirrors ask_human's blocking
+    but brackets it with begin_takeover/end_takeover so the handoff is seamless."""
     reason = args.get("reason", "")
     task_id_arg = kwargs.get("task_id", "")
     caller = "unknown"
@@ -598,34 +598,31 @@ def _request_human_takeover_handler(args: dict, **kwargs) -> str:
         return json.dumps({"error": f"Caller agent '{caller}' not registered."})
     team_id = (daemon.cfg or {}).get("team_id", "default")
 
-    # Start an on-demand noVNC bridge onto the team's hidden browser and get the
-    # URL the human opens to operate it (same persistent profile).
-    vnc_url = None
+    # Bring the team browser onto the human's screen as a real, visible Chrome
+    # window (same persistent profile), opened on the page the agent was blocked on.
+    shown = False
     try:
         from swarm_server.browser_pool import team_browser_manager
-        vnc_url = team_browser_manager.begin_takeover(team_id)
+        shown = team_browser_manager.begin_takeover(team_id)
     except Exception as e:
         log.error("[%s] [takeover] begin_takeover failed: %s", caller, e)
 
-    if vnc_url:
+    if shown:
         access = (
-            "\n\n👉 Open this link to see and operate the browser:\n" + vnc_url +
-            "\n(If you're working over SSH, first forward the port, e.g. "
-            "`ssh -L " + vnc_url.split("//127.0.0.1:")[1].split("/")[0] +
-            ":127.0.0.1:" + vnc_url.split("//127.0.0.1:")[1].split("/")[0] +
-            " <host>`, then open the link.)"
+            "\n\n👉 A Chrome window has just opened on your screen, on the page "
+            "that needs you. Complete the step there."
         )
     else:
         access = (
-            "\n\n⚠️ Couldn't start the browser viewer automatically — the takeover "
-            "bridge (x11vnc/websockify) may be unavailable on this host."
+            "\n\n⚠️ Couldn't open the browser window automatically (no display on "
+            "this host?). The browser session is the team's persistent profile."
         )
     prompt = (
         "🙋 BROWSER TAKEOVER requested by '" + caller + "':\n" + reason + access +
         "\n\nDo the step above in that window, then reply 'done' here to hand "
         "control back to the agent."
     )
-    log.info("[%s] [takeover] %s | vnc=%s", daemon.name, reason, vnc_url or "none")
+    log.info("[%s] [takeover] %s | window_shown=%s", daemon.name, reason, shown)
 
     from swarm_server.agent import AGENT_STATE_ASKING_HUMAN, AGENT_STATE_BUSY
 
