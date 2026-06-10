@@ -49,8 +49,27 @@ class TaskQueue:
             conn.commit()
 
     def enqueue(self, from_agent: str, payload: str) -> str:
-        task_id = str(uuid.uuid4())
+        """Add a task; idempotent on identical pending work.
+
+        If THE SAME sender already has a byte-identical payload sitting
+        'pending' (not yet claimed), return that task's id instead of inserting
+        a twin. This absorbs duplicate wakes structurally: a peer double-sending
+        the same message, or multiple corrective layers (turn guard, loop
+        detector, supervisor) injecting the same nudge, now cost ONE turn
+        instead of stacking. Time-stamped payloads (heartbeat/cron) differ
+        byte-wise, so periodic wake-ups are never suppressed.
+        """
         with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT id FROM tasks WHERE status='pending' AND from_agent=? "
+                "AND payload=? LIMIT 1",
+                (from_agent, payload),
+            ).fetchone()
+            if row:
+                log.info("[Queue] Dedup: identical pending task %s from '%s' — not re-enqueued",
+                         row[0][:8], from_agent)
+                return row[0]
+            task_id = str(uuid.uuid4())
             conn.execute(
                 "INSERT INTO tasks (id, from_agent, payload, status, created_at) VALUES (?,?,?,?,?)",
                 (task_id, from_agent, payload, "pending", time.time()),

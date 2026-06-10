@@ -516,6 +516,80 @@ class MonitoringDB:
             log.warning("[MonitorDB] get_open_delegations failed: %s", e)
             return []
 
+    def get_recent_closed_delegations(self, team_id: str = None,
+                                      limit: int = 8) -> List[dict]:
+        """Recently ANSWERED delegations, newest first.
+
+        Injected into the live context as RECENTLY COMPLETED so a delegator can
+        SEE that a task was already delivered before re-asking it. (Observed
+        failure: a coordinator re-delegated the same prospect-list task three
+        times because nothing in its prompt showed the closed item.)"""
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                sql = "SELECT * FROM delegations WHERE status='answered'"
+                params: list = []
+                if team_id:
+                    sql += " AND team_id = ?"; params.append(team_id)
+                sql += " ORDER BY answered_at DESC LIMIT ?"; params.append(limit)
+                return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
+        except Exception as e:
+            log.warning("[MonitorDB] get_recent_closed_delegations failed: %s", e)
+            return []
+
+    def get_latest_event_id(self) -> int:
+        """Current MAX(id) of the events table (watermark seeding)."""
+        try:
+            with self._conn() as conn:
+                row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()
+                return int(row[0] or 0)
+        except Exception as e:
+            log.warning("[MonitorDB] get_latest_event_id failed: %s", e)
+            return 0
+
+    def get_passive_messages_for(self, to_agent: str, after_event_id: int = 0,
+                                 limit: int = 20) -> Dict[str, Any]:
+        """Non-waking peer messages (STATUS/FYI) addressed to one agent, with
+        event id > after_event_id, oldest first.
+
+        Passive messages deliberately create no task — but before this query
+        they were visible only in the rolling team feed, where they scroll away
+        on a busy team. Senders who noticed their STATUS was never seen escalated
+        to waking TASKs just to be heard (observed in transcripts). The daemon
+        now drains this per-recipient backlog into the agent's next normal turn.
+        Returns {"messages": [...], "max_id": highest event id seen}."""
+        out: Dict[str, Any] = {"messages": [], "max_id": after_event_id}
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT id, timestamp, from_agent, data FROM events "
+                    "WHERE event_type = 'message_sent' AND to_agent = ? AND id > ? "
+                    "ORDER BY id ASC LIMIT ?",
+                    (to_agent, after_event_id, limit),
+                ).fetchall()
+                msgs = []
+                max_id = after_event_id
+                for r in rows:
+                    max_id = max(max_id, int(r["id"]))
+                    try:
+                        d = json.loads(r["data"] or "{}") or {}
+                    except Exception:
+                        d = {}
+                    if d.get("waking", True):
+                        continue  # waking kinds were delivered via the queue
+                    msgs.append({
+                        "id": int(r["id"]),
+                        "timestamp": r["timestamp"],
+                        "from_agent": r["from_agent"],
+                        "kind": d.get("kind") or "STATUS",
+                        "text": d.get("message_full") or d.get("message_preview") or "",
+                    })
+                out = {"messages": msgs, "max_id": max_id}
+        except Exception as e:
+            log.warning("[MonitorDB] get_passive_messages_for failed: %s", e)
+        return out
+
     # ---- Action audit log + idempotency ----
     def record_action(self, agent_name: str, action_type: str, idempotency_key: str,
                       target: str = "", outcome: str = "", verified: bool = False,

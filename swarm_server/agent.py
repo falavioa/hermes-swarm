@@ -13,13 +13,20 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from collections import deque
+
 from swarm_server.config import (
     AUTONOMOUS_HEARTBEAT_SECONDS,
+    DEFAULT_MAX_ITERATIONS,
+    HEARTBEAT_BACKOFF_MAX_DOUBLINGS,
     LITELLM_API_BASE,
     LLM_API_KEY,
     LLM_ERROR_EMIT_THROTTLE_SECONDS,
     MAX_BATCH_SIZE,
     MAX_TASK_RETRIES,
+    SELF_LOOP_COOLDOWN_SECONDS,
+    SELF_LOOP_REPEATS,
+    SELF_LOOP_WINDOW,
     SUPERVISOR_FEED_CHAR_CAP,
     SUPERVISOR_TOKEN_THRESHOLD,
     SWEEP_INTERVAL_SECONDS,
@@ -32,11 +39,13 @@ from swarm_server.config import (
 from swarm_server.prompts import (
     AUTONOMOUS_HEARTBEAT_PROMPT,
     CRON_WAKEUP_PROMPT,
+    SELF_LOOP_NUDGE,
     SUPERVISOR_FEED_PROMPT,
     TEXT_ONLY_TURN_NUDGE,
     compose_agent_soul,
     compose_live_context,
     compose_soul_identity,
+    strip_stale_live_context,
 )
 from swarm_server.browser_pool import team_browser_manager
 from swarm_server.monitoring import monitor_db
@@ -55,6 +64,60 @@ AGENT_STATE_IDLE = "idle"
 AGENT_STATE_BUSY = "busy"
 AGENT_STATE_ASKING_HUMAN = "asking_human"
 AGENT_STATE_PAUSED = "paused"
+
+# Senders that are control-plane injections, not real work arriving. A message
+# from anyone else (a peer, a human) is "real activity" and resets the idle
+# heartbeat backoff.
+_SYSTEM_SENDERS = frozenset(
+    {"autonomous", "cron", "turn-guard", "self-loop-guard", "supervisor-feed",
+     "loop_detector"}
+)
+
+
+def _turn_tool_signatures(turn_messages: List[Dict[str, Any]]) -> List[str]:
+    """Normalized signatures of every tool call an assistant made this turn.
+
+    'name(sorted-args-prefix)' — stable across formatting noise so the same
+    call with the same arguments compares equal across turns."""
+    sigs: List[str] = []
+    for m in turn_messages or []:
+        if m.get("role") != "assistant":
+            continue
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            name = fn.get("name") or "?"
+            args = fn.get("arguments")
+            if not isinstance(args, str):
+                try:
+                    args = json.dumps(args, sort_keys=True, default=str)
+                except Exception:
+                    args = str(args)
+            norm = " ".join((args or "").split())[:160]
+            sigs.append(f"{name}({norm})")
+    return sigs
+
+
+def detect_repeated_signature(
+    turn_sig_history, repeats: int = SELF_LOOP_REPEATS, window: int = SELF_LOOP_WINDOW,
+) -> Optional[str]:
+    """The self-loop check: a tool signature occurring in >= `repeats` of the
+    last `window` turns (counted once per turn). Within-turn repeats don't
+    count — retrying inside one turn is normal; re-issuing the identical call
+    turn after turn is the degenerate loop the team-level detectors can't see.
+    Returns the most-repeated signature, or None."""
+    recent = [set(s) for s in list(turn_sig_history)[-window:]]
+    if len(recent) < repeats:
+        return None
+    counts: Dict[str, int] = {}
+    for sigset in recent:
+        for s in sigset:
+            counts[s] = counts.get(s, 0) + 1
+    best: Optional[str] = None
+    best_n = 0
+    for s, c in counts.items():
+        if c >= repeats and c > best_n:
+            best, best_n = s, c
+    return best
 
 def _ensure_hermes_on_path() -> None:
     """Make the Hermes package importable (pip install / PYTHONPATH / checkout).
@@ -197,6 +260,23 @@ class AgentDaemon:
         # current latest id, so a supervisor reviews NEW activity only and never
         # gets a peer's entire backlog dumped into its queue at once.
         self._sup_watermark: Dict[str, int] = {}
+        # Idle-heartbeat backoff: consecutive heartbeat turns that produced no
+        # concrete action. Effective interval = base * 2**min(misses, cap), so a
+        # genuinely-idle 24/7 agent costs exponentially less instead of burning
+        # a full turn every interval forever; any real work or inbound message
+        # resets it to the base cadence.
+        self._hb_misses = 0
+        # Cross-turn repetition guard: per-turn tool-call signature sets for the
+        # last few turns, plus the last time a corrective was injected.
+        self._turn_sigs: deque = deque(maxlen=max(SELF_LOOP_WINDOW, 8))
+        self._last_self_loop_nudge = 0.0
+        # Passive-message delivery watermark (events.id). Seeded to "now" so the
+        # agent's next turn delivers only STATUS/FYI that arrive from here on,
+        # never a historical backlog.
+        try:
+            self._passive_watermark = monitor_db.get_latest_event_id()
+        except Exception:
+            self._passive_watermark = 0
 
     @staticmethod
     def _resolve_sweep_interval(cfg: Dict[str, Any]) -> float:
@@ -434,6 +514,11 @@ class AgentDaemon:
                         extra_kwargs["max_iterations"] = int(mi)
                     except (TypeError, ValueError):
                         pass
+                # No per-agent override -> apply the swarm-wide turn ceiling.
+                # Unbounded turns were observed running 49 tool calls in one go,
+                # monopolizing the agent's thread and dodging between-turn review.
+                if "max_iterations" not in extra_kwargs and DEFAULT_MAX_ITERATIONS > 0:
+                    extra_kwargs["max_iterations"] = DEFAULT_MAX_ITERATIONS
                 # Toolset whitelists/blacklists — accept a list or comma string.
                 def _as_list(v):
                     if isinstance(v, list):
@@ -588,6 +673,21 @@ class AgentDaemon:
             # session already carries the summary, so the current session alone is
             # the compacted, bounded view we want to replay.
             msgs = session_db.get_messages_as_conversation(current_sid, include_ancestors=False)
+            # History hygiene: every stored user turn embeds the live-context
+            # snapshot that was current WHEN THAT TURN RAN. Replayed as-is, a
+            # long session shows the model N conflicting copies of the brief /
+            # ledger / decision log with no way to tell which is true — observed
+            # as agents acting on stale ledger state (re-delegating closed
+            # work), and it is the largest per-turn token line item. Strip the
+            # expired copies on replay; only the CURRENT turn carries live state.
+            cleaned = []
+            for m in msgs:
+                if m.get("role") == "user" and isinstance(m.get("content"), str):
+                    stripped = strip_stale_live_context(m["content"])
+                    if stripped != m["content"]:
+                        m = {**m, "content": stripped}
+                cleaned.append(m)
+            msgs = cleaned
             log.debug("[%s] Loaded %d messages from session %s", self.name, len(msgs), current_sid)
             return msgs
         except Exception as e:
@@ -807,6 +907,11 @@ class AgentDaemon:
         })
 
     def ingest_task(self, from_agent: str, payload: str) -> str:
+        # Real inbound work (a peer or human, not a control-plane injection)
+        # snaps the idle-heartbeat backoff to the base cadence.
+        if from_agent not in _SYSTEM_SENDERS and self._hb_misses:
+            log.info("[%s] Real message from '%s' — heartbeat backoff reset", self.name, from_agent)
+            self._hb_misses = 0
         task_id = self.queue.enqueue(from_agent, payload)
         log.info("[%s] Task queued from '%s': %s", self.name, from_agent, payload[:80])
         monitor_db.log_event(
@@ -930,16 +1035,28 @@ class AgentDaemon:
                 return
         except Exception:
             return
-        if time.time() - self._last_active < self._heartbeat_seconds:
+        # Adaptive cadence: each consecutive no-op heartbeat doubles the wait
+        # (capped), so a 24/7 agent with genuinely nothing to do costs
+        # exponentially less instead of inventing busywork every interval.
+        effective = self.effective_heartbeat_interval(self._heartbeat_seconds, self._hb_misses)
+        if time.time() - self._last_active < effective:
             return
         self._last_active = time.time()
-        log.info("[%s] Autonomous heartbeat — injecting continue-mission task", self.name)
-        monitor_db.log_event(self.name, "autonomous_heartbeat", data={})
+        log.info("[%s] Autonomous heartbeat — injecting continue-mission task (backoff x%d)",
+                 self.name, 2 ** min(self._hb_misses, HEARTBEAT_BACKOFF_MAX_DOUBLINGS))
+        monitor_db.log_event(self.name, "autonomous_heartbeat",
+                             data={"misses": self._hb_misses, "effective_interval": effective})
         import datetime
         prompt = AUTONOMOUS_HEARTBEAT_PROMPT.format(
             time=datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
         )
         self.ingest_task("autonomous", prompt)
+
+    @staticmethod
+    def effective_heartbeat_interval(base: float, misses: int) -> float:
+        """Idle-heartbeat interval after `misses` consecutive no-op heartbeats:
+        base * 2**misses, capped at 2**HEARTBEAT_BACKOFF_MAX_DOUBLINGS."""
+        return float(base) * (2 ** min(max(0, int(misses)), HEARTBEAT_BACKOFF_MAX_DOUBLINGS))
 
     def _supervisor_threshold(self) -> int:
         """New-token threshold before a linked peer's activity is fed for review."""
@@ -1393,6 +1510,37 @@ class AgentDaemon:
         for i, task in enumerate(tasks, 1):
             combined += f"--- [{i}] from {task['from_agent']} ---\n{task['payload']}\n\n"
 
+        # Deliver passive STATUS/FYI addressed to this agent since its last
+        # delivery. These never wake anyone (that's the point), but parking them
+        # solely in the rolling team feed meant they scrolled away unseen on a
+        # busy team — and senders escalated to waking TASKs just to be heard.
+        # Delivered as a clearly-non-actionable trailer; watermark advances only
+        # after the turn succeeds, so a failed turn redelivers rather than drops.
+        passive_max_id = self._passive_watermark
+        try:
+            res = monitor_db.get_passive_messages_for(
+                self.name, self._passive_watermark, limit=12
+            )
+            passive_max_id = res.get("max_id", self._passive_watermark)
+            pmsgs = res.get("messages") or []
+            if pmsgs:
+                plines = []
+                for p in pmsgs:
+                    stamp = ""
+                    try:
+                        import datetime as _dt
+                        stamp = _dt.datetime.fromtimestamp(p["timestamp"]).strftime("%H:%M")
+                    except Exception:
+                        pass
+                    plines.append(f"  [{stamp}] {p['from_agent']} ({p['kind']}): {p['text']}")
+                combined += (
+                    "--- PASSIVE UPDATES addressed to you while idle (STATUS/FYI — "
+                    "informational only; you owe NO reply and must not answer them) ---\n"
+                    + "\n".join(plines) + "\n\n"
+                )
+        except Exception as e:
+            log.debug("[%s] passive delivery failed: %s", self.name, e)
+
         try:
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
@@ -1582,6 +1730,9 @@ class AgentDaemon:
             for t in tasks:
                 self.queue.mark_done(t["id"])
 
+            # Passive STATUS/FYI delivered in this turn are now consumed.
+            self._passive_watermark = passive_max_id
+
             # --- Text-only turn guard ----------------------------------------
             # Every turn ends with a stop-reason text message (API guarantee), so
             # that alone is not a fault. Fire ONLY when the turn ACTED on nothing:
@@ -1612,8 +1763,50 @@ class AgentDaemon:
                     self._text_only_nudged = True
                     self.ingest_task("turn-guard", TEXT_ONLY_TURN_NUDGE)
                     log.info("[%s] read-only/no-op turn ended in summary — enqueued one corrective", self.name)
+
+                # --- Idle-heartbeat backoff bookkeeping ----------------------
+                # CONCRETE means the turn touched something outside coordination
+                # AND outside pure reads — the same bar the supervisor signal
+                # uses. A heartbeat turn that produced nothing concrete is a
+                # miss (interval doubles); any concrete turn resets the cadence.
+                concrete = any(
+                    n and n not in self._NONACTION_TOOLS and n not in self._READONLY_TOOLS
+                    for n in tool_names
+                )
+                hb_batch = any(t.get("from_agent") == "autonomous" for t in tasks)
+                if concrete:
+                    self._hb_misses = 0
+                elif hb_batch:
+                    self._hb_misses += 1
+                    log.info("[%s] Heartbeat produced no concrete action (miss #%d) — backing off",
+                             self.name, self._hb_misses)
+                    monitor_db.log_event(self.name, "heartbeat_noop",
+                                         data={"misses": self._hb_misses})
+
+                # --- Cross-turn repetition guard (self-loop) ------------------
+                # The pair/team loop detectors can't see ONE agent re-issuing the
+                # identical tool call turn after turn (re-verifying, re-reading,
+                # re-sending). Track per-turn signature sets; when one signature
+                # recurs in SELF_LOOP_REPEATS of the last SELF_LOOP_WINDOW turns,
+                # inject ONE corrective naming the exact call (cooldown-capped)
+                # and reset the window so it can't immediately re-fire.
+                self._turn_sigs.append(_turn_tool_signatures(turn_messages))
+                rep = detect_repeated_signature(self._turn_sigs)
+                now_ts = time.time()
+                if rep and (now_ts - self._last_self_loop_nudge) >= SELF_LOOP_COOLDOWN_SECONDS:
+                    self._last_self_loop_nudge = now_ts
+                    self._turn_sigs.clear()
+                    log.warning("[%s] SELF-LOOP detected — repeated across turns: %s",
+                                self.name, rep[:140])
+                    monitor_db.log_event(self.name, "self_loop_detected",
+                                         data={"signature": rep[:300]})
+                    _broadcast("self_loop_detected", {
+                        "agent_name": self.name, "signature": rep[:300],
+                        "timestamp": now_ts,
+                    })
+                    self.ingest_task("self-loop-guard", SELF_LOOP_NUDGE.format(signature=rep))
             except Exception as e:
-                log.debug("[%s] text-only guard failed: %s", self.name, e)
+                log.debug("[%s] post-turn guards failed: %s", self.name, e)
         except Exception as exc:
             log.error("[%s] Batch failed: %s", self.name, exc)
             monitor_db.log_event(self.name, "error", data={"error": str(exc), "task_ids": task_ids})

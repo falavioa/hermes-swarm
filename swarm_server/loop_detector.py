@@ -157,7 +157,7 @@ def scan_team(team_id: str, member_names: List[str],
                 f"[SYSTEM — LOOP BREAKER] You and {other} are in a no-progress message "
                 f"loop ({pp['count']} messages, mostly repeats). STOP confirming/"
                 f"re-statusing. Either take ONE concrete external action toward the "
-                f"mission right now (publish / outreach / deploy / a real fix — and log "
+                f"team's brief right now (a publish, deploy, send, or real fix — and log "
                 f"it with log_action), or, if you are genuinely blocked, send {other} ONE "
                 f"message naming the exact blocker and then work a DIFFERENT task. Do not "
                 f"reply to acknowledge this."))
@@ -182,8 +182,8 @@ def scan_team(team_id: str, member_names: List[str],
             ingest_fn(target, "loop_detector", (
                 f"[SYSTEM — STALL BREAKER] The team sent {stall['messages']} messages in "
                 f"the last {LOOP_WINDOW_SECONDS // 60} minutes but shipped NOTHING (0 "
-                f"decisions, 0 actions). Talk is not progress. Take ONE concrete "
-                f"customer-facing action now and log it (log_action), or delegate ONE "
+                f"decisions, 0 actions). Talk is not progress. Take ONE concrete action "
+                f"from the team's brief now and log it (log_action), or delegate ONE "
                 f"specific shippable task to a specialist. Do not reply to acknowledge."))
             monitor_db.log_decision("loop_detector", note, team_id=team_id)
             _broadcast("loop_detected", {"team_id": team_id, "type": "stall",

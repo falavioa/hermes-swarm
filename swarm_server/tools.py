@@ -592,11 +592,17 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
 
     # Persist the peer message (not just broadcast it) so historical/REST queries
     # can reconstruct the conversation graph, not only the live dashboard.
+    # Passive kinds also carry the FULL body (capped): they are never enqueued,
+    # so this event is the only place the recipient's daemon can read the text
+    # from when it delivers the passive backlog into the next turn.
+    _evt_data = {"message_preview": message[:120], "kind": kind, "msg_id": msg_id,
+                 "waking": waking}
+    if not waking:
+        _evt_data["message_full"] = message[:2000]
     monitor_db.log_event(
         caller, "message_sent",
         from_agent=caller, to_agent=to_agent, task_id=task_id,
-        data={"message_preview": message[:120], "kind": kind, "msg_id": msg_id,
-              "waking": waking},
+        data=_evt_data,
     )
 
     _broadcast("message_sent", {
@@ -615,8 +621,9 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
             "kind": kind,
             "delivered": "passive",
             "message": (
-                f"{kind} delivered to '{to_agent}' (passive — it will see this in its "
-                f"recent-messages feed; it was NOT woken and owes no reply)."
+                f"{kind} recorded for '{to_agent}' (passive — it was NOT woken and owes "
+                f"no reply; the full text will be shown to it at the start of its next "
+                f"turn). Do not follow up with a TASK just to make sure it was seen."
             ),
         })
 

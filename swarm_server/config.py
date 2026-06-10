@@ -335,6 +335,37 @@ MAX_BATCH_SIZE = 10          # max tasks pulled into one LLM turn (backpressure)
 MAX_TASK_RETRIES = 3         # batch failures requeue up to N times, then -> 'failed' (DLQ)
 LLM_ERROR_EMIT_THROTTLE_SECONDS = 60  # min gap between "provider unreachable" UI errors per agent
 
+# Hard ceiling on tool-loop iterations within ONE turn, applied when the agent
+# config doesn't set its own max_iterations. Observed without it: a single agent
+# ran a 49-tool-call turn, monopolizing its thread and evading per-turn review
+# (supervisors/digests see activity between turns). 40 is generous for real
+# work; a task that genuinely needs more should be split across turns anyway.
+DEFAULT_MAX_ITERATIONS = int(os.environ.get("SWARM_MAX_ITERATIONS", "40"))
+
+# ---------------------------------------------------------------------------
+# Adaptive idle heartbeat (24/7 autonomy without idle burn)
+# ---------------------------------------------------------------------------
+# When consecutive heartbeat-driven turns produce ZERO concrete external action
+# (the agent had nothing real to do), the effective heartbeat interval doubles
+# per miss up to base * 2**HEARTBEAT_BACKOFF_MAX_DOUBLINGS. Any turn that takes
+# a concrete action resets it. This resolves the old two-failure-modes-on-one-
+# knob problem: heartbeat off => the org goes dormant; fixed-interval heartbeat
+# on => idle token burn + invented busywork all night.
+HEARTBEAT_BACKOFF_MAX_DOUBLINGS = int(os.environ.get("SWARM_HEARTBEAT_BACKOFF_MAX", "4"))
+
+# ---------------------------------------------------------------------------
+# Per-agent cross-turn repetition guard (self-loop detector)
+# ---------------------------------------------------------------------------
+# The team-level loop detector catches A<->B ping-pong and team stalls, but a
+# SINGLE agent repeating the same tool call with the same args across separate
+# turns (re-verifying, re-reading, re-sending) is invisible to it unless a
+# supervisor happens to review. The daemon tracks normalized per-turn tool-call
+# signatures; when one signature repeats in SELF_LOOP_REPEATS of the last
+# SELF_LOOP_WINDOW turns, ONE corrective task is injected (cooldown-limited).
+SELF_LOOP_REPEATS = int(os.environ.get("SWARM_SELF_LOOP_REPEATS", "3"))
+SELF_LOOP_WINDOW = int(os.environ.get("SWARM_SELF_LOOP_WINDOW", "5"))
+SELF_LOOP_COOLDOWN_SECONDS = int(os.environ.get("SWARM_SELF_LOOP_COOLDOWN", "1800"))
+
 # ---------------------------------------------------------------------------
 # Browser tools
 # ---------------------------------------------------------------------------
