@@ -15,6 +15,11 @@ log = logging.getLogger("swarm.websocket")
 # ---------------------------------------------------------------------------
 _main_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
+# Strong references to in-flight fire-and-forget broadcast tasks. The event loop
+# only keeps a weak reference, so without this a pending task can be GC'd
+# mid-flight (and its exceptions never surface). Tasks self-remove on completion.
+_background_tasks: Set[asyncio.Task] = set()
+
 # Global lock to serialize agent initialization (HERMES_HOME is process-scoped)
 _agent_init_lock = threading.Lock()
 
@@ -70,7 +75,9 @@ def _broadcast(event_type: str, payload: dict):
         try:
             current_loop = asyncio.get_running_loop()
             if current_loop is _main_event_loop:
-                asyncio.create_task(ws_broadcaster.broadcast(event_type, payload))
+                task = asyncio.create_task(ws_broadcaster.broadcast(event_type, payload))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
                 return
         except RuntimeError:
             pass

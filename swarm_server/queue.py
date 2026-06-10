@@ -10,6 +10,12 @@ from typing import Any, Dict, List
 
 log = logging.getLogger("swarm.queue")
 
+# Terminal (done/failed) rows are kept only this long. Without a sweep the
+# per-agent *_queue.db grows monotonically forever on a 24/7 run, since payloads
+# (e.g. supervisor sweeps up to ~32KB) are never reclaimed. Only terminal rows
+# are ever pruned — pending/processing work is always preserved.
+DONE_RETENTION_DAYS = 7
+
 
 class TaskQueue:
     SCHEMA = """
@@ -146,19 +152,58 @@ class TaskQueue:
             )
             conn.commit()
 
+    def prune_terminal(self, retention_days: int = DONE_RETENTION_DAYS) -> int:
+        """Delete terminal (done/failed) rows older than ``retention_days``.
+
+        Bounded retention sweep: terminal rows are never read back, so keeping
+        them forever just bloats the DB. Pending/processing rows are NEVER
+        touched. Returns the number of rows deleted.
+        """
+        cutoff = time.time() - retention_days * 86400
+        with self._lock, self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM tasks WHERE status IN ('done','failed') AND created_at < ?",
+                (cutoff,),
+            )
+            conn.commit()
+            deleted = cur.rowcount or 0
+        if deleted:
+            log.info("[Queue] Pruned %d terminal task(s) older than %dd", deleted, retention_days)
+        return deleted
+
+    def mark_processing_done(self) -> int:
+        """Flip all in-flight ('processing') rows to 'done' so they are NOT resurrected.
+
+        Used on an EXPLICIT operator stop. Unlike a crash — where recover_processing()
+        intentionally requeues in-flight work so it resumes — a stop means the current
+        batch must not re-run on the next restart. Returns the count cleared.
+        """
+        with self._lock, self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET status='done', processed_at=? WHERE status='processing'",
+                (time.time(),),
+            )
+            conn.commit()
+            return cur.rowcount or 0
+
     def recover_processing(self) -> int:
         """Requeue tasks left 'processing' by a previous run that crashed/restarted.
 
         Without this, a restart would either lose in-flight tasks (old behavior
         deleted the DB) or strand them forever in 'processing'. Returns the count
         recovered.
+
+        Also runs a bounded retention sweep (``prune_terminal``) at startup so
+        terminal rows don't accumulate forever across a 24/7 run.
         """
         with self._lock, self._conn() as conn:
             cur = conn.execute(
                 "UPDATE tasks SET status='pending', processed_at=NULL WHERE status='processing'"
             )
             conn.commit()
-            return cur.rowcount or 0
+            recovered = cur.rowcount or 0
+        self.prune_terminal()
+        return recovered
 
     def get_pending_count(self) -> int:
         with self._lock, self._conn() as conn:

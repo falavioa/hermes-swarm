@@ -4,7 +4,7 @@ Roster: founder, product, engineer, devops, growth, sales, overseer.
 """
 import json, urllib.request, urllib.error, sqlite3
 
-BASE = "http://127.0.0.1:8011"
+BASE = "http://127.0.0.1:8000"
 TEAM = "saas"
 
 def call(m, p, b=None):
@@ -74,12 +74,16 @@ AGENTS = [
      "toolsets": ["web", "browser", "file", "memory", "todo"],
      "peers": ["founder", "growth"]},
     {"id": "overseer", "name": "Overseer (Supervisor)", "soul": OVERSEER,
-     "toolsets": ["memory"], "is_supervisor": True, "threshold": 8000,
+     "toolsets": ["memory"], "is_supervisor": True,
      "peers": ["founder", "product", "engineer", "devops", "growth", "sales"]},
 ]
 
 # ---------------------------------------------------------------- 1. delete existing
 st, data = call("GET", "/agents")
+if st == 0:
+    # Server unreachable — bail out BEFORE the destructive local DB wipe below.
+    raise SystemExit("server not reachable at %s (%s) — aborting before any destructive step"
+                     % (BASE, data.get("error", "connection error")))
 existing = list((data.get("agents") or {}).keys())
 print("existing agents:", existing)
 for n in existing:
@@ -104,8 +108,8 @@ for a in AGENTS:
     call("POST", "/agent", {"agent_name": a["id"], "name": a["name"], "team_id": TEAM,
                             "role_soul": a["soul"], "is_supervisor": a.get("is_supervisor", False)})
     cfg = {"enabled_toolsets": a["toolsets"], "autonomous": False, "max_iterations": 25}
-    if a.get("threshold"):
-        cfg["supervisor_token_threshold"] = a["threshold"]
+    if a.get("interval_minutes"):
+        cfg["supervisor_interval_minutes"] = a["interval_minutes"]
     call("PATCH", "/agent/%s/config" % a["id"], cfg)
     print("  created+configured %-9s" % a["id"])
 

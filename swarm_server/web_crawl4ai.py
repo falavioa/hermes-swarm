@@ -72,6 +72,10 @@ async def _c4a_fetch(url: str) -> str:
         return res.markdown or ""
 
 
+# Each organic result lives in its own <div class="result ..."> block; split on
+# the block boundary so a result's link, title and snippet are parsed from the
+# SAME element (ads are then dropped per-block, keeping everything aligned).
+_RESULT_BLOCK_RE = re.compile(r'<div[^>]*\bclass="[^"]*\bresult\b[^"]*"', re.S)
 _RESULT_A_RE = re.compile(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.S)
 _SNIPPET_RE = re.compile(r'class="result__snippet"[^>]*>(.*?)</a>', re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -91,8 +95,21 @@ async def _c4a_search(query: str, limit: int):
         res = await crawler.arun(url=url)
     html = res.html or ""
 
+    # Split the SERP into per-result blocks so each link is paired with the
+    # snippet from its own block; ad blocks are skipped wholesale, so a leading
+    # ad can never shift snippets onto the wrong organic result.
+    bounds = [m.start() for m in _RESULT_BLOCK_RE.finditer(html)]
+    if bounds:
+        blocks = [html[bounds[i]:(bounds[i + 1] if i + 1 < len(bounds) else len(html))]
+                  for i in range(len(bounds))]
+    else:
+        blocks = [html]  # fallback: treat the whole page as one block
+
     results = []
-    for m in _RESULT_A_RE.finditer(html):
+    for block in blocks:
+        m = _RESULT_A_RE.search(block)
+        if not m:
+            continue
         href, title = m.group(1), _strip(m.group(2))
         parsed = urllib.parse.urlparse(href if href.startswith("http") else "https:" + href)
         uddg = urllib.parse.parse_qs(parsed.query).get("uddg", [None])[0]
@@ -101,13 +118,13 @@ async def _c4a_search(query: str, limit: int):
             continue
         if "duckduckgo.com/y.js" in real or "ad_provider=" in real:  # paid ad slot
             continue
-        results.append({"title": title, "url": real})
+        item = {"title": title, "url": real}
+        sm = _SNIPPET_RE.search(block)
+        if sm:
+            item["snippet"] = _strip(sm.group(1))[:300]
+        results.append(item)
         if len(results) >= limit:
             break
-
-    snippets = [_strip(s)[:300] for s in _SNIPPET_RE.findall(html)]
-    for i, snip in enumerate(snippets[: len(results)]):
-        results[i]["snippet"] = snip
     return results
 
 

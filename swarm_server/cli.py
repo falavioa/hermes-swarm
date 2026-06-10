@@ -83,9 +83,9 @@ def cmd_doctor(args) -> int:
 
     # 3) Chromium for the browser tools (optional but recommended)
     try:
-        from swarm_server.browser_pool import _find_chromium
+        from swarm_server.browser_pool import _find_browser
 
-        chromium = _find_chromium()
+        chromium = _find_browser()
         if chromium:
             print(f"✓ Chromium found: {chromium}")
         else:

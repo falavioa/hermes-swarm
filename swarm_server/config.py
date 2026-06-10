@@ -385,6 +385,13 @@ BROWSER_CLOUD_PROVIDER = "local"
 # ---------------------------------------------------------------------------
 MONITORING_MAX_EVENTS = 50000
 MONITORING_MAX_MESSAGES = 20000
+# Also bound the relational tables, which otherwise grow unbounded (prune() used
+# to trim only events/messages/digests). Open delegations are preserved.
+MONITORING_MAX_DIGESTS = 20000
+MONITORING_MAX_DELEGATIONS = 20000
+MONITORING_MAX_ACTIONS = 20000
+MONITORING_MAX_DECISIONS = 20000
+MONITORING_MAX_MILESTONES = 5000
 MONITORING_PRUNE_INTERVAL_SECONDS = 300
 
 # ---------------------------------------------------------------------------
@@ -874,8 +881,26 @@ def load_agents_config() -> Dict[str, Any]:
             with open(AGENTS_CONFIG_PATH, "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except Exception as e:
-            log.error("Failed to load agents config: %s. Returning default.", e)
-            return _default_config()
+            # The file EXISTS but could not be read/parsed. Returning an empty
+            # default here is catastrophic: the next load-modify-SAVE caller would
+            # persist the empty roster over the real one (a full wipe from a
+            # transient EMFILE/EACCES or a momentary corruption). Prefer the
+            # last-known-good cache, then the newest backup, and only RAISE as a
+            # last resort — never silently serve an empty config.
+            log.error("Failed to load agents config: %s", e)
+            if _config_cache is not None:
+                log.warning("Serving last-known-good agents config from cache")
+                return _deep_copy_config(_config_cache)
+            restored = _load_newest_backup()
+            if restored is not None:
+                log.warning("Recovered agents config from newest backup")
+                _config_cache = _deep_copy_config(restored)
+                return _deep_copy_config(restored)
+            raise RuntimeError(
+                "agents_config.json exists but is unreadable and no cache/backup "
+                "is available; refusing to serve an empty config that would wipe "
+                f"the roster on the next save: {e}"
+            ) from e
 
         # Detect legacy flat format (has string keys at top level with agent dict values)
         if "teams" not in raw and "agents" not in raw:
@@ -899,6 +924,28 @@ def load_agents_config() -> Dict[str, Any]:
 
 
 _CONFIG_BACKUP_KEEP = 10
+
+
+def _load_newest_backup() -> Optional[Dict[str, Any]]:
+    """Return the newest parseable backup of agents_config.json, or None.
+
+    Used to recover from a corrupt/unreadable live file instead of wiping the
+    roster. Best-effort: tries newest-first and skips any unparseable backup.
+    """
+    try:
+        backup_dir = DATA_ROOT / "config_backups"
+        backups = sorted(backup_dir.glob("agents_config.*.json"))
+        for path in reversed(backups):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    return raw
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 def _backup_config_file() -> None:
@@ -964,9 +1011,15 @@ def _save_full_config(cfg: Dict[str, Any]) -> None:
 
 
 def save_agent_config(agent_name: str, cfg: Dict[str, Any]) -> None:
-    full = load_agents_config()
-    full["agents"][agent_name] = cfg
-    _save_full_config(full)
+    # Atomic read-modify-write: hold the (reentrant) config lock across the load
+    # AND the save so a concurrent writer (e.g. another agent's add_agent_cron, or
+    # this agent's session-id rotation persist) can't read a stale full config and
+    # clobber the other's change. load_agents_config/_save_full_config both
+    # re-enter _config_lock, so wrapping them is safe.
+    with _config_lock:
+        full = load_agents_config()
+        full["agents"][agent_name] = cfg
+        _save_full_config(full)
 
 
 def save_all_config(cfg: Dict[str, Any]) -> None:
@@ -976,7 +1029,28 @@ def save_all_config(cfg: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Team CRUD
 # ---------------------------------------------------------------------------
+_SAFE_ID_RE = __import__("re").compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def validate_id(value: str, kind: str = "id") -> str:
+    """Return a filesystem-safe id or raise ValueError.
+
+    team_id / agent_name flow into ``WORKSPACE_ROOT/<id>/...`` paths (workspaces,
+    credentials.json). Without this a value like ``../../etc`` would let an API
+    caller create dirs / write files OUTSIDE DATA_ROOT (path traversal). Restrict
+    to a slug charset — no separators, no dots, no leading separator.
+    """
+    v = (value or "").strip()
+    if not _SAFE_ID_RE.match(v):
+        raise ValueError(
+            f"invalid {kind} {value!r}: must be 1–64 chars of letters/digits/_/- "
+            f"and cannot contain path separators or '..'"
+        )
+    return v
+
+
 def create_team(cfg: Dict[str, Any], team_id: str, name: str) -> Dict[str, Any]:
+    team_id = validate_id(team_id, "team_id")
     if team_id in cfg["teams"]:
         raise ValueError(f"Team '{team_id}' already exists")
     cfg["teams"][team_id] = {"name": name, "created_at": int(time.time())}
@@ -1225,16 +1299,19 @@ def get_global_settings() -> Dict[str, Any]:
 
 def update_global_settings(fields: Dict[str, Any]) -> Dict[str, Any]:
     """Patch known global settings keys and persist. Returns effective settings."""
-    cfg = load_agents_config()
-    settings = dict(cfg.get("settings") or {})
-    if "summary_model" in fields:
-        settings["summary_model"] = (fields["summary_model"] or "").strip()
-    if "digest_enabled" in fields:
-        settings["digest_enabled"] = bool(fields["digest_enabled"])
-    if "vision_model" in fields:
-        settings["vision_model"] = (fields["vision_model"] or "").strip()
-    cfg["settings"] = settings
-    _save_full_config(cfg)
+    # Atomic RMW under the reentrant lock so a concurrent agent/config write isn't
+    # clobbered by saving a stale full config (see save_agent_config).
+    with _config_lock:
+        cfg = load_agents_config()
+        settings = dict(cfg.get("settings") or {})
+        if "summary_model" in fields:
+            settings["summary_model"] = (fields["summary_model"] or "").strip()
+        if "digest_enabled" in fields:
+            settings["digest_enabled"] = bool(fields["digest_enabled"])
+        if "vision_model" in fields:
+            settings["vision_model"] = (fields["vision_model"] or "").strip()
+        cfg["settings"] = settings
+        _save_full_config(cfg)
     out = dict(_GLOBAL_SETTINGS_DEFAULTS)
     for k in _GLOBAL_SETTINGS_DEFAULTS:
         if k in settings and settings[k] is not None:
@@ -1346,16 +1423,25 @@ def model_supports_vision(model: str, base_url: str, api_key: str) -> bool:
     base_url = (base_url or "").strip()
     if not model or not base_url:
         return False
-    key = (base_url, model)
+    # Key includes the api_key: a probe that failed under a BAD key must not pin a
+    # False verdict that survives the operator fixing the credential (same
+    # base_url/model). The key is in-process memory only.
+    key = (base_url, model, api_key or "")
     with _VISION_PROBE_LOCK:
         if key in _VISION_PROBE_CACHE:
             return _VISION_PROBE_CACHE[key]
     try:
         verdict = _vision_probe(model, base_url, api_key)
     except Exception as e:
-        log.info("vision probe failed for %s @ %s (%s) — treating as text-only",
-                 model, base_url, e)
-        verdict = False
+        # Probe ERRORED (auth/network/proxy/timeout) — this is NOT a definitive
+        # "text-only" answer. Return False for this call but do NOT cache it, so a
+        # later call (e.g. after the key/proxy is fixed) re-probes instead of being
+        # pinned to the fallback vision model for the whole process lifetime.
+        log.info("vision probe failed for %s @ %s (%s) — treating as text-only "
+                 "for now (not cached; will retry)", model, base_url, e)
+        return False
+    # Only a probe that actually completed (image seen or definitively not) is
+    # cached — capability is stable under a fixed model name.
     with _VISION_PROBE_LOCK:
         _VISION_PROBE_CACHE[key] = verdict
     log.info("vision capability: %s @ %s -> %s", model, base_url, verdict)
@@ -1389,18 +1475,12 @@ def add_agent_cron(
     """Validate + append a cron wake-up to an agent. Returns the new entry."""
     from swarm_server.cron import cron_validate
 
-    a = cfg["agents"].get(name)
-    if a is None:
-        raise ValueError(f"Agent '{name}' not found")
     instruction = (instruction or "").strip()
     if not instruction:
         raise ValueError("A cron wake-up needs an instruction to run when it fires.")
     ok, norm = cron_validate(schedule or "")
     if not ok:
         raise ValueError(f"Invalid schedule: {norm}")
-    crons = a.setdefault("crons", [])
-    if len(crons) >= MAX_CRONS_PER_AGENT:
-        raise ValueError(f"Cron limit reached ({MAX_CRONS_PER_AGENT}). Delete one first.")
     entry = {
         "id": str(_uuid.uuid4()),
         "schedule": norm,
@@ -1409,8 +1489,23 @@ def add_agent_cron(
         "created_at": int(time.time()),
         "created_by": created_by,
     }
-    crons.append(entry)
-    _save_full_config(cfg)
+    # Atomic RMW against a FRESH load under the lock, so appending a cron can't
+    # clobber a concurrent writer (e.g. another agent's session-id persist) by
+    # saving a stale full config.
+    with _config_lock:
+        full = load_agents_config()
+        a = full["agents"].get(name)
+        if a is None:
+            raise ValueError(f"Agent '{name}' not found")
+        crons = a.setdefault("crons", [])
+        if len(crons) >= MAX_CRONS_PER_AGENT:
+            raise ValueError(f"Cron limit reached ({MAX_CRONS_PER_AGENT}). Delete one first.")
+        crons.append(entry)
+        _save_full_config(full)
+        # Reflect into the caller's cfg view (best-effort) so it stays consistent.
+        caller_agent = cfg.get("agents", {}).get(name)
+        if isinstance(caller_agent, dict):
+            caller_agent.setdefault("crons", []).append(entry)
     return entry
 
 

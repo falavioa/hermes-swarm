@@ -21,11 +21,12 @@ use, not a hostile host (the host already holds every agent's workspace).
 import json
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from swarm_server.config import WORKSPACE_ROOT
+from swarm_server.config import WORKSPACE_ROOT, validate_id
 
 log = logging.getLogger("swarm.credentials")
 
@@ -33,10 +34,18 @@ _LOCK = threading.Lock()
 
 
 def _creds_path(team_id: str) -> Path:
-    return WORKSPACE_ROOT / team_id / "credentials.json"
+    # Validate before joining into a path: a team_id like '../../x' would otherwise
+    # read/write credentials.json OUTSIDE the team workspace (path traversal).
+    return WORKSPACE_ROOT / validate_id(team_id, "team_id") / "credentials.json"
 
 
 def load_credentials(team_id: str) -> Dict[str, Dict[str, Any]]:
+    """Lenient read path: returns {} on a missing OR unreadable file.
+
+    Used by get_credential / listing where a corrupt file should degrade (agent
+    can't fetch) rather than crash. The WRITE path must NOT use this — see
+    _load_for_write, which refuses to treat a corrupt existing file as empty.
+    """
     path = _creds_path(team_id)
     if not path.exists():
         return {}
@@ -45,8 +54,44 @@ def load_credentials(team_id: str) -> Dict[str, Dict[str, Any]]:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception as e:
-        log.warning("could not read %s (%s)", path, e)
+        log.error("could not read %s (%s)", path, e)
         return {}
+
+
+def _load_for_write(team_id: str) -> Dict[str, Dict[str, Any]]:
+    """Strict load for read-modify-write: {} ONLY when the file is absent.
+
+    Raises if the file exists but can't be parsed, so a single save/delete never
+    silently overwrites a corrupt-but-recoverable file and destroys every OTHER
+    stored credential for the team (the file is the only copy of those secrets).
+    """
+    path = _creds_path(team_id)
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return data
+
+
+def _atomic_write_creds(path: Path, creds: Dict[str, Any]) -> None:
+    """Durable atomic write (mkstemp + fsync + os.replace), 0600."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".credentials.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(creds, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def save_credential(team_id: str, site: str, username: str, secret: str,
@@ -60,31 +105,20 @@ def save_credential(team_id: str, site: str, username: str, secret: str,
     entry = {"username": (username or "").strip(), "secret": secret or "",
              "purpose": purpose.strip(), "notes": (notes or "").strip()}
     with _LOCK:
-        creds = load_credentials(team_id)
+        creds = _load_for_write(team_id)
         creds[site] = entry
-        path = _creds_path(team_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(creds, f, indent=2, ensure_ascii=False)
-        os.chmod(tmp, 0o600)
-        tmp.replace(path)
+        _atomic_write_creds(_creds_path(team_id), creds)
     return entry
 
 
 def delete_credential(team_id: str, site: str) -> bool:
     site = (site or "").strip().lower()
     with _LOCK:
-        creds = load_credentials(team_id)
+        creds = _load_for_write(team_id)
         if site not in creds:
             return False
         del creds[site]
-        path = _creds_path(team_id)
-        tmp = path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(creds, f, indent=2, ensure_ascii=False)
-        os.chmod(tmp, 0o600)
-        tmp.replace(path)
+        _atomic_write_creds(_creds_path(team_id), creds)
     return True
 
 

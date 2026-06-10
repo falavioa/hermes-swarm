@@ -5,7 +5,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +24,11 @@ from swarm_server.config import (
     MONITORING_DB,
     MONITORING_MAX_EVENTS,
     MONITORING_MAX_MESSAGES,
+    MONITORING_MAX_DIGESTS,
+    MONITORING_MAX_DELEGATIONS,
+    MONITORING_MAX_ACTIONS,
+    MONITORING_MAX_DECISIONS,
+    MONITORING_MAX_MILESTONES,
     MONITORING_PRUNE_INTERVAL_SECONDS,
     get_global_settings,
     update_global_settings,
@@ -67,7 +72,14 @@ async def _periodic_monitoring_prune():
     while True:
         await asyncio.sleep(MONITORING_PRUNE_INTERVAL_SECONDS)
         try:
-            monitor_db.prune(MONITORING_MAX_EVENTS, MONITORING_MAX_MESSAGES)
+            monitor_db.prune(
+                MONITORING_MAX_EVENTS, MONITORING_MAX_MESSAGES,
+                max_digests=MONITORING_MAX_DIGESTS,
+                max_delegations=MONITORING_MAX_DELEGATIONS,
+                max_actions=MONITORING_MAX_ACTIONS,
+                max_decisions=MONITORING_MAX_DECISIONS,
+                max_milestones=MONITORING_MAX_MILESTONES,
+            )
         except Exception as e:
             log.warning("[Prune] %s", e)
 
@@ -357,6 +369,73 @@ async def post_settings(request: Request):
     return JSONResponse({"status": "ok", "settings": settings})
 
 
+async def _end_takeover_async(team_id: str) -> None:
+    """Hand the team browser back to its hidden display WITHOUT blocking the event
+    loop. end_takeover does sync urllib / time.sleep polling / a subprocess
+    relaunch (multiple seconds), so it must run off the loop or it freezes every
+    agent's sweep, all WS broadcasts, and every other request."""
+    try:
+        from swarm_server.browser_pool import team_browser_manager
+        await asyncio.get_running_loop().run_in_executor(
+            None, team_browser_manager.end_takeover, team_id
+        )
+    except Exception as e:
+        log.warning("[human] end_takeover failed: %s", e)
+
+
+async def _finalize_human_answer(daemon, qid: str, response_text: str) -> Dict[str, Any]:
+    """Route a human's answer through the single atomic delivery point and run any
+    follow-up (resume-task enqueue, browser hand-back). Returns a JSON-able dict."""
+    from swarm_server.tools import deliver_human_answer
+    from swarm_server.websocket import _broadcast
+
+    result = deliver_human_answer(qid, response_text)
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error", "delivery failed")}
+
+    _broadcast("human_responded", {
+        "agent_name": result["agent"],
+        "question_id": qid,
+        "response_preview": response_text[:120],
+        "timestamp": __import__("time").time(),
+    })
+
+    if result["delivery"] == "task":
+        # The agent already ended its turn (or this answers a stale/old question).
+        # Only a real browser TAKEOVER hands the browser back here — an ordinary
+        # question must NOT call end_takeover (it would yank a DIFFERENT agent's
+        # live takeover window, or spawn an unused browser). Run it off the loop.
+        if result.get("kind") == "takeover":
+            await _end_takeover_async((daemon.cfg or {}).get("team_id", "default"))
+        resume_msg = (
+            "✅ The human answered a question you were blocked on.\n\n"
+            f"Your question: {result.get('question', '')}\n"
+            f"Human's answer: {response_text}\n\n"
+            "Resume the action you were blocked on and COMPLETE it now "
+            "(e.g. use the credentials to log in via the browser and publish). "
+            "Do not just acknowledge — finish the task and report what went live."
+        )
+        daemon.ingest_task("human", resume_msg)
+    return {"ok": True, "delivery": result["delivery"], "question_id": qid}
+
+
+def _resolve_pending_qid(agent_name: str, daemon) -> Optional[str]:
+    """The question this agent is (or was last) blocking on: its current
+    human_question_id if still pending, else the newest pending question."""
+    from swarm_server.tools import _pending_human_questions, _pending_lock
+    with _pending_lock:
+        cur = getattr(daemon, "human_question_id", None)
+        q = _pending_human_questions.get(cur) if cur else None
+        if q and q["status"] == "pending":
+            return cur
+        newest = None
+        for qid, q in _pending_human_questions.items():
+            if q["agent_name"] == agent_name and q["status"] == "pending":
+                if newest is None or q["timestamp"] > newest[1]:
+                    newest = (qid, q["timestamp"])
+        return newest[0] if newest else None
+
+
 @app.post("/agent/{agent_name}/human_response")
 async def human_response(agent_name: str, request: Request):
     body = await request.json()
@@ -366,14 +445,20 @@ async def human_response(agent_name: str, request: Request):
     daemon = daemons.get(agent_name)
     if daemon is None:
         return JSONResponse({"error": "agent not found"}, status_code=404)
-    if daemon.state != AGENT_STATE_ASKING_HUMAN:
+    qid = _resolve_pending_qid(agent_name, daemon)
+    if not qid:
         return JSONResponse(
-            {"error": f"Agent is not asking human (state: {daemon.state})"},
+            {"error": f"Agent has no pending question (state: {daemon.state})"},
             status_code=400,
         )
-    daemon.human_response = response_text
-    daemon.human_event.set()
-    return {"status": "ok", "message": "Response sent to agent."}
+    # Route through the atomic deliverer: it marks the question answered (so it
+    # doesn't linger 'pending' forever and inflate counts / re-deliver later) and
+    # either wakes the in-turn waiter or enqueues a resume task.
+    result = await _finalize_human_answer(daemon, qid, response_text)
+    if not result.get("ok"):
+        return JSONResponse({"error": result.get("error")}, status_code=404)
+    return {"status": "ok", "message": "Response delivered to agent.",
+            "delivery": result["delivery"]}
 
 
 # ---------------------------------------------------------------------------
@@ -419,8 +504,11 @@ async def del_team(team_id: str):
 async def get_team_credentials(team_id: str):
     from swarm_server.credentials import list_credentials_public
 
-    return JSONResponse({"team_id": team_id,
-                         "credentials": list_credentials_public(team_id)})
+    try:
+        creds = list_credentials_public(team_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"team_id": team_id, "credentials": creds})
 
 
 @app.post("/teams/{team_id}/credentials")
@@ -446,7 +534,11 @@ async def post_team_credential(team_id: str, request: Request):
 async def delete_team_credential(team_id: str, site: str):
     from swarm_server.credentials import delete_credential
 
-    if delete_credential(team_id, site):
+    try:
+        deleted = delete_credential(team_id, site)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if deleted:
         return JSONResponse({"status": "deleted", "site": site})
     return JSONResponse({"error": "credential not found"}, status_code=404)
 
@@ -1162,7 +1254,7 @@ async def get_human_inbox():
 
 @app.post("/inbox/{agent_name}/respond")
 async def respond_to_human_question(agent_name: str, request: Request):
-    from swarm_server.tools import _pending_human_questions, _pending_lock, answer_question
+    from swarm_server.tools import _pending_human_questions, _pending_lock
 
     body = await request.json()
     response_text = body.get("response", "")
@@ -1175,28 +1267,27 @@ async def respond_to_human_question(agent_name: str, request: Request):
     if daemon is None:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
 
-    # If a question_id was passed, validate it matches current daemon question
-    if question_id:
-        current_qid = getattr(daemon, "human_question_id", None)
-        if current_qid != question_id:
-            # Still update registry for historical record, but warn
-            log.warning(
-                "[Inbox] QID mismatch for %s: daemon has %s, request sent %s",
-                agent_name, current_qid, question_id,
-            )
-
-    # Find the most recent pending question for this agent
-    found_qid = question_id
-    if not found_qid:
-        with _pending_lock:
-            for qid, q in sorted(
-                _pending_human_questions.items(),
-                key=lambda x: x[1]["timestamp"],
-                reverse=True,
-            ):
+    # Resolve the target question. An explicit question_id is honored ONLY if it is
+    # genuinely a pending question for THIS agent — never blindly delivered as the
+    # answer to whatever the agent is currently blocked on (answering an OLD
+    # question must not feed its text to a NEW one). Otherwise pick the newest
+    # pending question for this agent.
+    found_qid = None
+    with _pending_lock:
+        if question_id:
+            q = _pending_human_questions.get(question_id)
+            if q and q["agent_name"] == agent_name and q["status"] == "pending":
+                found_qid = question_id
+            else:
+                log.warning("[Inbox] Ignoring question_id %s for %s (not a pending "
+                            "question for this agent)", question_id, agent_name)
+        if not found_qid:
+            newest = None
+            for qid, q in _pending_human_questions.items():
                 if q["agent_name"] == agent_name and q["status"] == "pending":
-                    found_qid = qid
-                    break
+                    if newest is None or q["timestamp"] > newest[1]:
+                        newest = (qid, q["timestamp"])
+            found_qid = newest[0] if newest else None
 
     if not found_qid:
         return JSONResponse(
@@ -1204,57 +1295,17 @@ async def respond_to_human_question(agent_name: str, request: Request):
             status_code=404,
         )
 
-    # Grab the question text (for the resume-task path) before marking answered.
-    from swarm_server.tools import _pending_human_questions, _pending_lock as _pl
-    with _pl:
-        q_obj = _pending_human_questions.get(found_qid) or {}
-        question_text = q_obj.get("question", "")
-
-    # Update registry
-    answer_question(found_qid, response_text)
-
-    # Deliver the answer. Two cases:
-    if daemon.state == AGENT_STATE_ASKING_HUMAN:
-        # (a) Agent is still blocking inside ask_human → resume it in-turn.
-        daemon.human_response = response_text
-        daemon.human_event.set()
-        log.info("[Inbox] Response delivered in-turn to %s (qid=%s)", agent_name, found_qid)
-    else:
-        # (b) Agent already ended its turn (the in-turn wait elapsed). Re-deliver
-        # the answer as a NEW TASK so it wakes up and resumes the blocked action
-        # (e.g. log in and publish). This is what lets the swarm survive a human
-        # who answers hours later — the request never gets lost.
-        daemon.human_event.set()  # harmless if nothing is waiting
-        # If this was a browser takeover the human did out-of-turn, send the
-        # browser back to its hidden display now (no-op for ordinary questions).
-        try:
-            from swarm_server.browser_pool import team_browser_manager
-            team_browser_manager.end_takeover((daemon.cfg or {}).get("team_id", "default"))
-        except Exception as _e:
-            log.warning("[Inbox] end_takeover after delayed answer failed: %s", _e)
-        resume_msg = (
-            "✅ The human answered a question you were blocked on.\n\n"
-            f"Your question: {question_text}\n"
-            f"Human's answer: {response_text}\n\n"
-            "Resume the action you were blocked on and COMPLETE it now "
-            "(e.g. use the credentials to log in via the browser and publish). "
-            "Do not just acknowledge — finish the task and report what went live."
-        )
-        daemon.ingest_task("human", resume_msg)
-        log.info("[Inbox] Response re-delivered as resume-task to %s (qid=%s)", agent_name, found_qid)
-
-    from swarm_server.websocket import _broadcast
-
-    _broadcast("human_responded", {
-        "agent_name": agent_name,
-        "question_id": found_qid,
-        "response_preview": response_text[:120],
-        "timestamp": __import__("time").time(),
-    })
+    # Single atomic delivery path (marks answered + wakes in-turn XOR enqueues a
+    # resume task; only a real takeover hands the browser back, off the loop).
+    result = await _finalize_human_answer(daemon, found_qid, response_text)
+    if not result.get("ok"):
+        return JSONResponse({"error": result.get("error")}, status_code=404)
     return JSONResponse({
         "success": True,
         "question_id": found_qid,
-        "message": "Response delivered to agent." if daemon.state == AGENT_STATE_ASKING_HUMAN else "Response stored (agent already moved on).",
+        "delivery": result["delivery"],
+        "message": ("Response delivered to agent." if result["delivery"] == "in_turn"
+                    else "Response delivered as a resume task (agent had moved on)."),
     })
 
 

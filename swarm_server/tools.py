@@ -28,8 +28,18 @@ _pending_human_questions: Dict[str, Dict[str, Any]] = {}
 _pending_lock = threading.Lock()
 
 
-def add_pending_question(agent_name: str, question: str) -> str:
-    """Register a new human question and return its ID."""
+def add_pending_question(
+    agent_name: str, question: str, *, waiting_in_turn: bool = False, kind: str = "question"
+) -> str:
+    """Register a new human question and return its ID.
+
+    ``waiting_in_turn`` marks that the agent's worker thread is blocking in-turn on
+    this exact question RIGHT NOW — set atomically at registration so there is no
+    window where the question is answerable but the live-waiter flag is still
+    unset (which would let an answer be both delivered in-turn AND re-queued as a
+    task). ``kind`` distinguishes a browser takeover from an ordinary question so
+    only real takeovers trigger end_takeover on answer.
+    """
     from swarm_server.config import MAX_PENDING_QUESTIONS
 
     qid = str(uuid.uuid4())
@@ -41,6 +51,8 @@ def add_pending_question(agent_name: str, question: str) -> str:
             "timestamp": time.time(),
             "status": "pending",
             "response": None,
+            "waiting_in_turn": waiting_in_turn,
+            "kind": kind,
         }
         # Bound the in-memory registry: drop oldest RESOLVED questions past the
         # cap (never drop pending ones — an agent may still be waiting on them).
@@ -78,6 +90,54 @@ def mark_timed_out(qid: str) -> None:
         q = _pending_human_questions.get(qid)
         if q and q["status"] == "pending":
             q["status"] = "timed_out"
+
+
+def deliver_human_answer(qid: str, response: str) -> Dict[str, Any]:
+    """Atomically record a human's answer and decide HOW it reaches the agent.
+
+    This is the single synchronization point for every answer path. Under
+    ``_pending_lock`` it marks the question answered and, in the SAME critical
+    section, reads whether a live in-turn waiter is parked on this exact question
+    (``waiting_in_turn``). That atomicity is what makes the two outcomes mutually
+    exclusive — an answer is delivered in-turn XOR re-queued as a task, never both
+    and never neither:
+
+      • a live waiter  → wake it in place (set its event); the blocked handler
+        re-reads the registry and returns the response. No task is queued.
+      • no live waiter → the caller must enqueue a resume task (the agent already
+        ended its turn, or this is a stale/old question the agent isn't on).
+
+    Because the decision is per-question, answering an OLD question never feeds its
+    answer to an agent currently blocked on a DIFFERENT one, and a pause/stop that
+    merely sets the event (without answering) leaves status 'pending' so this never
+    misreports a wake as an answer.
+
+    Returns ``{"ok", "delivery": "in_turn"|"task", "agent", "question", "kind"}``
+    or ``{"ok": False, "error"}`` when the qid is unknown.
+    """
+    with _pending_lock:
+        q = _pending_human_questions.get(qid)
+        if not q:
+            return {"ok": False, "error": "question not found"}
+        q["status"] = "answered"
+        q["response"] = response
+        q["answered_at"] = time.time()
+        agent_name = q["agent_name"]
+        info = {
+            "ok": True,
+            "agent": agent_name,
+            "question": q.get("question", ""),
+            "kind": q.get("kind", "question"),
+        }
+        if q.get("waiting_in_turn"):
+            daemon = _daemon_registry.get(agent_name)
+            if daemon is not None:
+                daemon.human_response = response
+                daemon.human_event.set()
+                info["delivery"] = "in_turn"
+                return info
+        info["delivery"] = "task"
+        return info
 
 
 # ---------------------------------------------------------------------------
@@ -551,8 +611,8 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
             ),
         })
 
+    import hashlib as _hashlib
     import time as _time
-    import uuid as _uuid
 
     # Typed messages: kind decides whether the recipient is WOKEN. STATUS/FYI are
     # passive (they surface in the recipient's recent-messages feed but create no
@@ -564,7 +624,15 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
     reply_to = (args.get("reply_to") or "").strip()
     team_id = cfg["agents"].get(caller, {}).get("team_id")
     waking = kind in ("TASK", "QUESTION", "RESULT")
-    msg_id = _uuid.uuid4().hex[:8]
+    # DETERMINISTIC correlation id: derive it from the message identity, NOT a
+    # fresh uuid. A random id was embedded in the header, so two identical TASK
+    # sends produced different payloads and slipped past the queue's byte-identical
+    # pending-dedup — waking the recipient twice and opening two delegations of
+    # which only one ever closed (a phantom "overdue" forever). With a content
+    # hash, a duplicate send is byte-identical → deduped to one wake/one delegation.
+    msg_id = _hashlib.sha1(
+        f"{caller}|{to_agent}|{kind}|{reply_to}|{message}".encode("utf-8")
+    ).hexdigest()[:8]
 
     task_id = None
     if waking:
@@ -637,6 +705,69 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
     })
 
 
+def _block_on_human(daemon, caller: str, prompt: str, *, kind: str = "question"):
+    """Register a human question, block the worker thread until it's answered or
+    the wait elapses, and report the outcome as ``(qid, answered, response)``.
+
+    Shared by ask_human and the browser takeover so the subtle correctness
+    ordering lives in ONE place:
+
+      • the wake channel is ARMED (event cleared, response nulled) BEFORE the
+        question is exposed, and the question is registered with
+        waiting_in_turn=True atomically — so an answer landing the instant it's
+        answerable is never lost nor double-delivered (see deliver_human_answer);
+      • on wake, the answered/not decision is read from the REGISTRY status, not
+        the event flag — pause_execution/stop_execution also set human_event to
+        break the wait, and that must NOT be mistaken for a human answer.
+
+    On timeout/pause/stop the question is LEFT pending, so a later answer is
+    re-delivered as a task by the REST endpoint.
+    """
+    from swarm_server.agent import AGENT_STATE_ASKING_HUMAN, AGENT_STATE_BUSY
+
+    # Arm the wake channel before the question becomes answerable.
+    daemon.human_event.clear()
+    daemon.human_response = None
+    with daemon._lock:
+        daemon.state = AGENT_STATE_ASKING_HUMAN
+    qid = add_pending_question(caller, prompt, waiting_in_turn=True, kind=kind)
+    daemon.human_question_id = qid
+
+    monitor_db.log_event(caller, "human_waiting",
+                         data={"question": prompt, "question_id": qid, "kind": kind})
+    _broadcast("human_waiting", {
+        "agent_name": caller, "question": prompt, "question_id": qid,
+        "kind": kind, "timestamp": time.time(),
+    })
+
+    # Block the worker thread waiting for an in-turn answer. If it elapses we DON'T
+    # fail — the question stays pending and a late answer is re-delivered as a task.
+    daemon.human_event.wait(timeout=_ASK_HUMAN_WAIT_SECONDS)
+
+    with daemon._lock:
+        daemon.state = AGENT_STATE_BUSY
+
+    answered = False
+    response = None
+    with _pending_lock:
+        q = _pending_human_questions.get(qid)
+        if q:
+            # Clear the live-waiter flag in the SAME critical section we read the
+            # status, so a concurrent deliver_human_answer either delivered before
+            # this (status=='answered' here) or now takes the task path.
+            q["waiting_in_turn"] = False
+            if q["status"] == "answered":
+                answered = True
+                response = q["response"]
+        # On timeout we deliberately LEAVE the question 'pending' (do NOT mark it
+        # timed_out): it stays open in the human's inbox, and a later answer is
+        # re-delivered as a new task — this is what makes a 24/7 swarm survive a
+        # human who is away for hours.
+    if answered:
+        daemon.human_response = response
+    return qid, answered, response
+
+
 def _ask_human_handler(args: dict, **kwargs) -> str:
     question = args.get("question", "")
     task_id_arg = kwargs.get("task_id", "")
@@ -650,46 +781,9 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
 
     log.info("[%s] [ask_human] Question: %s", daemon.name, question)
 
-    # Register in global inbox
-    qid = add_pending_question(caller, question)
-    daemon.human_question_id = qid
+    qid, answered, response = _block_on_human(daemon, caller, question, kind="question")
 
-    from swarm_server.agent import AGENT_STATE_ASKING_HUMAN, AGENT_STATE_BUSY
-
-    monitor_db.log_event(caller, "human_waiting", data={"question": question, "question_id": qid})
-    _broadcast("human_waiting", {
-        "agent_name": caller,
-        "question": question,
-        "question_id": qid,
-        "timestamp": time.time(),
-    })
-
-    with daemon._lock:
-        daemon.state = AGENT_STATE_ASKING_HUMAN
-
-    daemon.human_event.clear()
-    daemon.human_response = None
-    # Block the worker thread for this long waiting for an in-turn answer (smooth
-    # path when a human is present). If it elapses, we DON'T fail — the question
-    # stays pending and a late answer is re-delivered as a task. Kept modest so a
-    # single blocked agent never parks its thread for hours.
-    daemon.human_event.wait(timeout=_ASK_HUMAN_WAIT_SECONDS)
-
-    with daemon._lock:
-        daemon.state = AGENT_STATE_BUSY
-
-    # Check if a response was provided via the API
-    with _pending_lock:
-        q = _pending_human_questions.get(qid)
-        if q and q["status"] == "answered":
-            daemon.human_response = q["response"]
-        # On timeout we deliberately LEAVE the question 'pending' (do NOT mark it
-        # timed_out): it stays open in the human's inbox indefinitely, and when
-        # they eventually answer, the inbox endpoint re-delivers the response to
-        # this agent as a new task (see respond_to_human_question). This is what
-        # makes a 24/7 swarm survive a human who is away for hours.
-
-    if not daemon.human_event.is_set():
+    if not answered:
         log.info(
             "[%s] [ask_human] No response in %ds — question stays pending; agent "
             "ends turn and will be re-notified when answered", daemon.name, _ASK_HUMAN_WAIT_SECONDS,
@@ -709,17 +803,17 @@ def _ask_human_handler(args: dict, **kwargs) -> str:
             ),
         })
 
-    log.info("[%s] [ask_human] Response received: %s", daemon.name, daemon.human_response)
-    monitor_db.log_event(caller, "human_responded", data={"question": question, "response": daemon.human_response})
+    log.info("[%s] [ask_human] Response received: %s", daemon.name, response)
+    monitor_db.log_event(caller, "human_responded", data={"question": question, "response": response})
     _broadcast("human_responded", {
         "agent_name": caller,
         "question": question,
-        "response": daemon.human_response,
+        "response": response,
         "question_id": qid,
         "timestamp": time.time(),
     })
 
-    return json.dumps({"success": True, "response": daemon.human_response})
+    return json.dumps({"success": True, "response": response})
 
 
 def _request_human_takeover_handler(args: dict, **kwargs) -> str:
@@ -763,31 +857,9 @@ def _request_human_takeover_handler(args: dict, **kwargs) -> str:
     )
     log.info("[%s] [takeover] %s | window_shown=%s", daemon.name, reason, shown)
 
-    from swarm_server.agent import AGENT_STATE_ASKING_HUMAN, AGENT_STATE_BUSY
+    qid, answered, response = _block_on_human(daemon, caller, prompt, kind="takeover")
 
-    qid = add_pending_question(caller, prompt)
-    daemon.human_question_id = qid
-    monitor_db.log_event(caller, "human_waiting",
-                         data={"question": prompt, "question_id": qid, "kind": "takeover"})
-    _broadcast("human_waiting", {
-        "agent_name": caller, "question": prompt, "question_id": qid,
-        "kind": "takeover", "timestamp": time.time(),
-    })
-
-    with daemon._lock:
-        daemon.state = AGENT_STATE_ASKING_HUMAN
-    daemon.human_event.clear()
-    daemon.human_response = None
-    daemon.human_event.wait(timeout=_ASK_HUMAN_WAIT_SECONDS)
-    with daemon._lock:
-        daemon.state = AGENT_STATE_BUSY
-
-    with _pending_lock:
-        q = _pending_human_questions.get(qid)
-        if q and q["status"] == "answered":
-            daemon.human_response = q["response"]
-
-    if not daemon.human_event.is_set():
+    if not answered:
         # Human not back yet: leave the browser ON their screen (they still need to
         # act) and the request pending. When they answer, the inbox endpoint sends
         # the browser back to the hidden display and re-delivers the response.
@@ -808,13 +880,13 @@ def _request_human_takeover_handler(args: dict, **kwargs) -> str:
     except Exception as e:
         log.error("[%s] [takeover] end_takeover failed: %s", caller, e)
     monitor_db.log_event(caller, "human_responded",
-                         data={"question": prompt, "response": daemon.human_response, "kind": "takeover"})
+                         data={"question": prompt, "response": response, "kind": "takeover"})
     _broadcast("human_responded", {
-        "agent_name": caller, "response": daemon.human_response,
+        "agent_name": caller, "response": response,
         "question_id": qid, "kind": "takeover", "timestamp": time.time(),
     })
     return json.dumps({
-        "success": True, "status": "completed", "response": daemon.human_response,
+        "success": True, "status": "completed", "response": response,
         "message": (
             "Human finished the manual step; the browser session is now "
             "authenticated/unblocked. Continue your task from here."

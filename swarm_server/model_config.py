@@ -121,6 +121,7 @@ def build_provider_presets() -> List[Dict[str, Any]]:
         out.append({"id": pid, "label": d["label"], "base_url": d["base_url"],
                     "key_env": d["key_env"], "auth_type": "api_key",
                     "openai_compatible": True, "needs_base_url": False, "models": []})
+    registry_ok = False
     try:
         ensure_hermes_importable()
         from hermes_cli.auth import PROVIDER_REGISTRY
@@ -141,13 +142,19 @@ def build_provider_presets() -> List[Dict[str, Any]]:
                 "needs_base_url": False,
                 "models": list(_PM.get(pid, []))[:8],
             })
+        registry_ok = True
     except Exception as e:
         log.warning("provider registry unavailable (%s) — minimal preset list", e)
     # Custom last.
     d = _EXTRA_OPENAI_PRESETS["custom"]
     out.append({"id": "custom", "label": d["label"], "base_url": "", "key_env": d["key_env"],
                 "auth_type": "api_key", "openai_compatible": True, "needs_base_url": True, "models": []})
-    _presets_cache = out
+    # Only cache when the registry import SUCCEEDED. Caching the degraded minimal
+    # list would permanently misroute native providers (e.g. anthropic -> custom)
+    # even after Hermes becomes importable; returning it un-cached lets the next
+    # call retry the import.
+    if registry_ok:
+        _presets_cache = out
     return out
 
 
@@ -252,7 +259,29 @@ def resolve_model(agent_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     provider = ov_provider or base.get("provider") or "custom"
     model = ov_model or base.get("model") or DEFAULT_MODEL
-    api_key = ov_key or base.get("api_key") or ""
+
+    # api_key: prefer an explicit override key. Otherwise inherit the default's
+    # key ONLY when the override stays on the SAME provider (and base_url) as the
+    # default — otherwise we'd send e.g. the OpenRouter key to Anthropic and 401
+    # every turn. An override that switches provider without its own key gets an
+    # empty key (and a warning), not the wrong provider's secret.
+    if ov_key:
+        api_key = ov_key
+    else:
+        base_provider = base.get("provider") or ""
+        base_base_url = base.get("base_url") or ""
+        same_provider = (not ov_provider) or (ov_provider == base_provider)
+        same_base_url = (not ov_base) or (ov_base == base_base_url)
+        if same_provider and same_base_url:
+            api_key = base.get("api_key") or ""
+        else:
+            api_key = ""
+            log.warning(
+                "Agent override switches to provider=%s (base_url=%s) with no "
+                "api_key configured; not borrowing the default %s key.",
+                ov_provider or provider, ov_base or "(native)",
+                base_provider or "(none)",
+            )
 
     preset = _preset(provider)
     openai_compat = preset.get("openai_compatible", True) if preset else True

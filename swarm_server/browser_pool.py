@@ -190,6 +190,18 @@ class TeamBrowserManager:
         except Exception:
             return False
 
+    def _healthy_retry(self, port: int, attempts: int = 3, delay: float = 0.2) -> bool:
+        """A few quick CDP probes before concluding a browser is dead, so a single
+        slow response (heavy page / swap) doesn't trigger a kill. Returns True as
+        soon as any probe succeeds. Kept short (delay is tiny) since this runs
+        under the pool lock."""
+        for i in range(attempts):
+            if self._healthy(port):
+                return True
+            if i < attempts - 1:
+                time.sleep(delay)
+        return False
+
     def _capture_active_url(self, port: int) -> Optional[str]:
         """The URL of the team browser's current real page (so a takeover opens
         the human directly on the page the agent was blocked on). Skips blank /
@@ -293,10 +305,18 @@ class TeamBrowserManager:
             return None
         with self._lock:
             info = self._browsers.get(team_id)
-            if info and info["proc"].poll() is None and self._healthy(info["port"]):
-                return f"http://127.0.0.1:{info['port']}"
             if info and info["proc"].poll() is None:
-                self._terminate(info["proc"])
+                # The process is alive — only restart if the CDP endpoint is
+                # genuinely dead, not on a single slow probe. A transient timeout
+                # (heavy page / swap) while ANOTHER agent is mid-session must NOT
+                # hard-kill the shared browser and race its cookie flush. Retry a
+                # couple of times with a short delay (total well under ~1s, safe
+                # under the lock) before declaring it dead.
+                if self._healthy_retry(info["port"]):
+                    return f"http://127.0.0.1:{info['port']}"
+                # Genuinely unhealthy: close gracefully so cookies flush, falling
+                # back to a hard terminate only if the graceful close fails.
+                self._quit_browser(info, team_id)
             return self._launch(team_id, headful=False)
 
     # -- human takeover (mode switch) --------------------------------------
@@ -400,11 +420,18 @@ class TeamBrowserManager:
             pass
 
     def shutdown_all(self) -> None:
-        """Terminate all team browsers (profiles persist on disk for next run)."""
+        """Stop all team browsers (profiles persist on disk for next run).
+
+        Close GRACEFULLY (``_quit_browser``) so cookies/sessions flush to each
+        profile before exit — a plain SIGTERM races Chrome's network service and
+        can lose just-written login cookies, so a restart after a login takeover
+        would otherwise drop the session. ``_quit_browser`` falls back to a hard
+        terminate if the graceful close doesn't land.
+        """
         with self._lock:
             for team_id, info in self._browsers.items():
                 log.info("[%s] Stopping team browser (port %d)", team_id, info["port"])
-                self._terminate(info["proc"])
+                self._quit_browser(info, team_id)
             self._browsers.clear()
 
 

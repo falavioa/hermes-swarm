@@ -184,7 +184,16 @@ def cron_next(expr: str, after: float) -> Optional[float]:
         if dt.minute not in mins:
             dt = dt + timedelta(minutes=1)
             continue
-        return dt.timestamp()
+        ts = dt.timestamp()
+        # Enforce the strict-after contract. During a DST fall-back the repeated
+        # hour maps naive->timestamp with fold=0 (the FIRST occurrence), so a
+        # candidate inside that hour can resolve to a timestamp <= ``after``.
+        # Returning it would make the caller re-fire the same cron every tick;
+        # advance and keep scanning until we get a strictly-greater timestamp.
+        if ts <= after:
+            dt = dt + timedelta(minutes=1)
+            continue
+        return ts
     return None
 
 

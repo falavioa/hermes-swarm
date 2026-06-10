@@ -20,8 +20,9 @@
     --border: #1E1E23;
     --border-strong: #2A2A31;
     --text: #ECECEE;
+    --text-secondary: #B9B9C0;
     --text-muted: #8A8A93;
-    --text-dim: #5A5A63;
+    --text-dim: #82828C;   /* >=4.5:1 on every surface up to --bg-hover */
     --accent: #6E56F7;
     --accent-bright: #8B79FF;
     --accent-soft: rgba(110,86,247,0.14);
@@ -29,6 +30,9 @@
     --busy: #F5B544;
     --human: #5B9DFF;
     --danger: #F2555A;
+    --danger-strong: #C9353B;        /* solid button bg - white text >=4.5:1 */
+    --danger-strong-hover: #D63B41;
+    --success-ink: #04281A;          /* dark ink for text on --idle fills */
     --tool: #A78BFA;
     --r-sm: 6px;
     --r-md: 9px;
@@ -52,6 +56,18 @@ body {
 }
 :root { --topbar-h: 52px; }
 input, button, select, textarea { font-family: inherit; letter-spacing: inherit; }
+/* Reset for semantic <button> on elements styled as plain text/chrome.
+   Declared BEFORE the component classes so their own padding/border/color win. */
+.bare { background: none; border: 0; padding: 0; color: inherit; font: inherit; letter-spacing: inherit; text-align: left; cursor: pointer; }
+/* Inline SVG icons (stroke, currentColor) - the app's icon system. */
+.ic { display: inline-block; vertical-align: -2px; flex-shrink: 0; }
+/* Visually hidden, still announced by screen readers. */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+/* Keyboard focus: visible ring on every control. Inputs keep their existing
+   box-shadow focus style (their :focus rule sets outline: none). */
+:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 2px; border-radius: 4px; }
+#network-svg g[role="button"]:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 3px; }
+button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .tnum, .stat-badge, .queue-badge, .queue-bar-count, .msg-time, .ev-time, .cfg-telemetry, #net-info, .topbar-stats { font-variant-numeric: tabular-nums; }
 .topbar {
     background: rgba(10,10,13,0.72);
@@ -237,8 +253,10 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 .btn:active { transform: translateY(0); box-shadow: none; }
 .btn-secondary { background: var(--bg-card); border: 1px solid var(--border); color: var(--text); }
 .btn-secondary:hover { background: var(--bg-hover); border-color: var(--border-strong); box-shadow: none; }
-.btn-danger { background: var(--danger); border: 1px solid transparent; color: #fff; }
-.btn-danger:hover { background: #ff6b70; box-shadow: 0 6px 20px -8px var(--danger); }
+.btn-danger { background: var(--danger-strong); border: 1px solid transparent; color: #fff; }
+.btn-danger:hover { background: var(--danger-strong-hover); box-shadow: 0 6px 20px -8px var(--danger); }
+.btn-success { background: var(--idle); border: 1px solid transparent; color: var(--success-ink); }
+.btn-success:hover { background: #5BDCA2; box-shadow: 0 6px 20px -8px var(--idle); }
 .btn-sm { padding: 6px 11px; font-size: 11px; width: auto; }
 .modal-bg { position: fixed; inset: 0; background: rgba(4,4,6,0.66); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); z-index: 200; display: none; align-items: center; justify-content: center; }
 .modal-bg.show { display: flex; animation: fadeIn 0.18s ease; }
@@ -399,19 +417,20 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
     </div>
     <div style="display:flex;align-items:center;gap:12px">
         <button id="inbox-btn" class="btn btn-sm btn-secondary" onclick="toggleInbox()" style="position:relative;">
-            &#9993; Inbox
-            <span id="inbox-badge" style="
+            <span data-icon="mail" data-icon-size="13"></span> Inbox
+            <span id="inbox-badge" role="status" aria-label="Pending inbox items" style="
                 display:none;
                 position:absolute;top:-5px;right:-5px;
-                background:var(--danger);color:white;font-size:10px;
+                background:var(--danger-strong);color:white;font-size:10px;
                 font-weight:700;padding:1px 6px;border-radius:10px;
             ">0</span>
         </button>
-        <button class="btn btn-sm btn-secondary" onclick="showModelSettings(false)" title="Default model for all agents">🧠 Model</button>
+        <button class="btn btn-sm btn-secondary" onclick="showModelSettings(false)" title="Default model for all agents"><span data-icon="cpu" data-icon-size="13"></span> Model</button>
+        <label for="team-select" class="sr-only">Team</label>
         <select id="team-select" onchange="changeTeam(this.value)"><option value="">Loading teams...</option></select>
         <button class="btn btn-sm btn-secondary" onclick="showAddTeam()">+ New Team</button>
-        <button class="btn btn-sm btn-secondary" onclick="deleteTeam()" title="Delete the current team and all its agents" style="color:var(--danger)">🗑</button>
-        <div class="ws-status disconnected" id="ws-status"><span class="ws-dot"></span><span id="ws-text">Disconnected</span></div>
+        <button class="btn btn-sm btn-secondary" onclick="deleteTeam()" title="Delete the current team and all its agents" aria-label="Delete the current team" style="color:var(--danger)"><span data-icon="trash" data-icon-size="13"></span></button>
+        <div class="ws-status disconnected" id="ws-status" role="status"><span class="ws-dot"></span><span id="ws-text">Disconnected</span></div>
     </div>
 </div>
 
@@ -420,10 +439,10 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
     <div id="net-pan"><svg id="network-svg" viewBox="0 0 580 300"></svg></div>
     <div class="net-stat" id="net-info">No data</div>
     <div class="zoom-controls">
-        <button onclick="zoomBy(1/1.25)" title="Zoom out">−</button>
-        <span class="zoom-pct" id="zoom-pct" onclick="fitView()" title="Fit to view">100%</span>
-        <button onclick="zoomBy(1.25)" title="Zoom in">+</button>
-        <button onclick="fitView()" title="Fit network to view">⛶</button>
+        <button onclick="zoomBy(1/1.25)" title="Zoom out" aria-label="Zoom out">−</button>
+        <button class="bare zoom-pct" id="zoom-pct" onclick="fitView()" title="Fit to view" aria-label="Zoom level - activate to fit view">100%</button>
+        <button onclick="zoomBy(1.25)" title="Zoom in" aria-label="Zoom in">+</button>
+        <button onclick="fitView()" title="Fit network to view" aria-label="Fit network to view"><span data-icon="maximize" data-icon-size="13"></span></button>
     </div>
 </div>
 
@@ -432,14 +451,14 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
     <div class="panel-header">
         <span>Agents</span>
         <div class="ph-actions">
-            <span class="density-toggle" id="density-toggle" onclick="toggleDensity()" title="Toggle compact / detailed view">compact</span>
+            <button class="bare density-toggle" id="density-toggle" onclick="toggleDensity()" title="Toggle compact / detailed view" aria-pressed="false">compact</button>
             <button class="btn btn-sm btn-secondary" onclick="showAddAgent()">+ Add</button>
-            <button class="btn btn-sm btn-secondary" onclick="showLinkEditor()" title="Edit agent links">🔗</button>
-            <span class="ov-collapse" onclick="togglePanel('ov-agents')" title="Collapse">▾</span>
+            <button class="btn btn-sm btn-secondary" onclick="showLinkEditor()" title="Edit agent links" aria-label="Edit agent links"><span data-icon="link" data-icon-size="12"></span></button>
+            <button class="bare ov-collapse" onclick="togglePanel('ov-agents')" title="Collapse" aria-label="Collapse agents panel" aria-expanded="true"><span data-icon="chevron-down" data-icon-size="12"></span></button>
         </div>
     </div>
     <div class="panel-body" id="agent-list">
-        <div class="empty-state"><div class="empty-state-icon">🔍</div><div>Select a team</div></div>
+        <div class="empty-state"><div class="empty-state-icon"><span data-icon="search" data-icon-size="26"></span></div><div>Select a team</div></div>
     </div>
 </div>
 
@@ -449,7 +468,7 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
         <span>Task Queues</span>
         <div class="ph-actions">
             <span style="font-size:10px;color:var(--text-muted);text-transform:none;letter-spacing:0" id="sweep-timer">idle</span>
-            <span class="ov-collapse" onclick="togglePanel('ov-queue')" title="Collapse">▾</span>
+            <button class="bare ov-collapse" onclick="togglePanel('ov-queue')" title="Collapse" aria-label="Collapse task queues panel" aria-expanded="true"><span data-icon="chevron-down" data-icon-size="12"></span></button>
         </div>
     </div>
     <div class="panel-body" id="queue-bars"></div>
@@ -460,20 +479,20 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
     <div class="panel-header"><span id="msg-header">Live Execution</span>
         <div class="ph-actions">
             <span style="font-size:10px;color:var(--text-muted)" id="msg-count">0</span>
-            <span class="ov-collapse" onclick="togglePanel('ov-right')" title="Collapse">▾</span>
+            <button class="bare ov-collapse" onclick="togglePanel('ov-right')" title="Collapse" aria-label="Collapse messages panel" aria-expanded="true"><span data-icon="chevron-down" data-icon-size="12"></span></button>
         </div>
     </div>
     <div class="view-tabs">
-        <button class="view-tab" id="tab-history" onclick="setView('history')">📜 History</button>
+        <button class="view-tab" id="tab-history" onclick="setView('history')"><span data-icon="history" data-icon-size="11"></span> History</button>
         <button class="view-tab active" id="tab-live" onclick="setView('live')"><span class="live-dot"></span>Live Execution</button>
-        <button class="view-tab" id="tab-digests" onclick="setView('digests')">🧭 Digests</button>
+        <button class="view-tab" id="tab-digests" onclick="setView('digests')"><span data-icon="compass" data-icon-size="11"></span> Digests</button>
     </div>
-    <div class="panel-body" id="message-list" style="display:none"><div class="empty-state"><div class="empty-state-icon">💬</div><div>Select an agent</div></div></div>
-    <div class="panel-body exec-trace" id="exec-trace"><div class="empty-state"><div class="empty-state-icon">⚡</div><div>Select an agent</div></div></div>
-    <div class="panel-body" id="digest-list" style="display:none"><div class="empty-state"><div class="empty-state-icon">🧭</div><div>Select an agent</div></div></div>
+    <div class="panel-body" id="message-list" style="display:none"><div class="empty-state"><div class="empty-state-icon"><span data-icon="message-square" data-icon-size="26"></span></div><div>Select an agent</div></div></div>
+    <div class="panel-body exec-trace" id="exec-trace"><div class="empty-state"><div class="empty-state-icon"><span data-icon="zap" data-icon-size="26"></span></div><div>Select an agent</div></div></div>
+    <div class="panel-body" id="digest-list" style="display:none"><div class="empty-state"><div class="empty-state-icon"><span data-icon="compass" data-icon-size="26"></span></div><div>Select an agent</div></div></div>
     <div class="controls-section">
         <div style="display:flex;gap:5px">
-            <input class="control-input" id="ctrl-payload" placeholder="Message the selected agent…" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();sendTask();}">
+            <input class="control-input" id="ctrl-payload" placeholder="Message the selected agent…" aria-label="Message the selected agent" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();sendTask();}">
             <button class="btn" style="width:auto;white-space:nowrap" onclick="sendTask()">Send</button>
         </div>
         <div style="margin-top:5px;display:flex;gap:5px"><button class="btn btn-secondary" style="flex:1" onclick="refreshData()">Refresh</button><button class="btn btn-secondary" style="flex:1" onclick="clearLog()">Clear</button></div>
@@ -482,21 +501,21 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 
 <!-- Event log (bottom-center, collapsed by default) -->
 <div class="ov ov-log event-log-container collapsed" id="event-log">
-    <div class="panel-header" onclick="toggleLog()" style="cursor:pointer"><span>🖥️ Event Log</span><span class="ov-collapse" id="log-toggle">▾</span></div>
-    <div class="event-log-body" id="event-log-body"></div>
+    <div class="panel-header" onclick="toggleLog()" style="cursor:pointer"><span><span data-icon="terminal" data-icon-size="12"></span> Event Log</span><button class="bare ov-collapse" id="log-toggle" onclick="event.stopPropagation();toggleLog()" aria-label="Toggle event log" aria-expanded="false"><span data-icon="chevron-down" data-icon-size="12"></span></button></div>
+    <div class="event-log-body" id="event-log-body" role="log"></div>
 </div>
 
 <!-- Add Agent Modal -->
 <div class="modal-bg" id="modal-add-agent">
-    <div class="modal">
-        <div class="modal-header">Add Agent</div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-add-agent">
+        <div class="modal-header" id="mh-add-agent">Add Agent</div>
         <div class="modal-body">
-            <div class="control-group"><span class="control-label">Agent ID (slug)</span><input class="control-input" id="add-agent-id" placeholder="e.g., researcher_2"></div>
-            <div class="control-group"><span class="control-label">Display Name</span><input class="control-input" id="add-agent-name" placeholder="e.g., Researcher Agent 2"></div>
-            <div class="control-group"><span class="control-label">Allowed Peers / Watched agents (comma-separated)</span><input class="control-input" id="add-agent-peers" placeholder="editor, reviewer"></div>
-            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);cursor:pointer;margin:2px 0 8px"><input type="checkbox" id="add-agent-supervisor" onchange="onSupervisorToggle()"> 👁 Supervisor agent</label>
+            <div class="control-group"><label class="control-label" for="add-agent-id">Agent ID (slug)</label><input class="control-input" id="add-agent-id" placeholder="e.g., researcher_2"></div>
+            <div class="control-group"><label class="control-label" for="add-agent-name">Display Name</label><input class="control-input" id="add-agent-name" placeholder="e.g., Researcher Agent 2"></div>
+            <div class="control-group"><label class="control-label" for="add-agent-peers">Allowed Peers / Watched agents (comma-separated)</label><input class="control-input" id="add-agent-peers" placeholder="editor, reviewer"></div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);cursor:pointer;margin:2px 0 8px"><input type="checkbox" id="add-agent-supervisor" onchange="onSupervisorToggle()"> <span data-icon="eye" data-icon-size="13"></span> Supervisor agent</label>
             <div id="add-agent-supervisor-hint" style="display:none;font-size:11px;color:var(--text-muted);line-height:1.5;margin:-4px 0 8px">A supervisor watches the agents above (its peers): their recent conversation is fed into its queue automatically as they work, and it can steer them with peer messages. Leave its Role Soul blank to use the default supervisor brief.</div>
-            <div class="control-group"><span class="control-label">Role Soul (your prompt)</span><textarea class="control-textarea" id="add-agent-soul" placeholder="Describe this agent's responsibilities, expertise, and behavior..."></textarea></div>
+            <div class="control-group"><label class="control-label" for="add-agent-soul">Role Soul (your prompt)</label><textarea class="control-textarea" id="add-agent-soul" placeholder="Describe this agent's responsibilities, expertise, and behavior..."></textarea></div>
         </div>
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="hideModal('modal-add-agent')">Cancel</button>
@@ -507,11 +526,11 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 
 <!-- Add Team Modal -->
 <div class="modal-bg" id="modal-add-team">
-    <div class="modal">
-        <div class="modal-header">Create Team</div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-add-team">
+        <div class="modal-header" id="mh-add-team">Create Team</div>
         <div class="modal-body">
-            <div class="control-group"><span class="control-label">Team ID (slug)</span><input class="control-input" id="add-team-id" placeholder="e.g., alpha"></div>
-            <div class="control-group"><span class="control-label">Team Name</span><input class="control-input" id="add-team-name" placeholder="e.g., Alpha Team"></div>
+            <div class="control-group"><label class="control-label" for="add-team-id">Team ID (slug)</label><input class="control-input" id="add-team-id" placeholder="e.g., alpha"></div>
+            <div class="control-group"><label class="control-label" for="add-team-name">Team Name</label><input class="control-input" id="add-team-name" placeholder="e.g., Alpha Team"></div>
         </div>
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="hideModal('modal-add-team')">Cancel</button>
@@ -522,47 +541,47 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 
 <!-- Agent Config Modal -->
 <div class="modal-bg" id="modal-agent-config">
-    <div class="modal">
-        <div class="modal-header">⚙️ Configure <span id="cfg-agent-title"></span></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-agent-config">
+        <div class="modal-header" id="mh-agent-config"><span data-icon="settings" data-icon-size="14"></span> Configure <span id="cfg-agent-title"></span></div>
         <div class="modal-body">
             <input type="hidden" id="cfg-agent-id">
-            <div class="control-group"><span class="control-label">Display Name</span><input class="control-input" id="cfg-name"></div>
-            <div class="control-group"><span class="control-label">Model</span><select class="control-select" id="cfg-model"></select></div>
+            <div class="control-group"><label class="control-label" for="cfg-name">Display Name</label><input class="control-input" id="cfg-name"></div>
+            <div class="control-group"><label class="control-label" for="cfg-model">Model</label><select class="control-select" id="cfg-model"></select></div>
             <div class="control-group"><label class="cfg-check"><input type="checkbox" id="cfg-autonomous"> Autonomous — self-drives the mission when its queue is idle</label></div>
             <div class="cfg-row">
-                <div class="control-group"><span class="control-label">Sweep interval (s)</span><input class="control-input" id="cfg-sweep" type="number" min="1" placeholder="default 10"></div>
-                <div class="control-group"><span class="control-label">Reasoning effort</span><select class="control-select" id="cfg-reasoning"><option value="">Default</option><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+                <div class="control-group"><label class="control-label" for="cfg-sweep">Sweep interval (s)</label><input class="control-input" id="cfg-sweep" type="number" min="1" placeholder="default 10"></div>
+                <div class="control-group"><label class="control-label" for="cfg-reasoning">Reasoning effort</label><select class="control-select" id="cfg-reasoning"><option value="">Default</option><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
             </div>
             <div class="cfg-row">
-                <div class="control-group"><span class="control-label">Temperature</span><input class="control-input" id="cfg-temp" type="number" step="0.05" min="0" max="2" placeholder="model default"></div>
-                <div class="control-group"><span class="control-label">Max tokens</span><input class="control-input" id="cfg-maxtok" type="number" min="1" placeholder="model default"></div>
+                <div class="control-group"><label class="control-label" for="cfg-temp">Temperature</label><input class="control-input" id="cfg-temp" type="number" step="0.05" min="0" max="2" placeholder="model default"></div>
+                <div class="control-group"><label class="control-label" for="cfg-maxtok">Max tokens</label><input class="control-input" id="cfg-maxtok" type="number" min="1" placeholder="model default"></div>
             </div>
             <div class="cfg-row">
-                <div class="control-group"><span class="control-label">Provider</span><input class="control-input" id="cfg-provider" placeholder="custom / proxy (blank = auto)"></div>
-                <div class="control-group"><span class="control-label">Max iterations</span><input class="control-input" id="cfg-maxiter" type="number" min="1" placeholder="default 90"></div>
+                <div class="control-group"><label class="control-label" for="cfg-provider">Provider</label><input class="control-input" id="cfg-provider" placeholder="custom / proxy (blank = auto)"></div>
+                <div class="control-group"><label class="control-label" for="cfg-maxiter">Max iterations</label><input class="control-input" id="cfg-maxiter" type="number" min="1" placeholder="default 90"></div>
             </div>
             <div class="cfg-row">
-                <div class="control-group"><span class="control-label">Compression threshold (0–1)</span><input class="control-input" id="cfg-compress" type="number" step="0.05" min="0.1" max="0.95" placeholder="default"></div>
-                <div class="control-group"><span class="control-label">Autonomous wake-up every (s)</span><input class="control-input" id="cfg-heartbeat" type="number" min="60" placeholder="default 1800"></div>
+                <div class="control-group"><label class="control-label" for="cfg-compress">Compression threshold (0–1)</label><input class="control-input" id="cfg-compress" type="number" step="0.05" min="0.1" max="0.95" placeholder="default"></div>
+                <div class="control-group"><label class="control-label" for="cfg-heartbeat">Autonomous wake-up every (s)</label><input class="control-input" id="cfg-heartbeat" type="number" min="60" placeholder="default 1800"></div>
             </div>
-            <div class="control-group"><span class="control-label">Supervisor sweep every (min) — supervisors only</span><input class="control-input" id="cfg-supinterval" type="number" min="2" placeholder="default 20"></div>
-            <div class="control-group"><span class="control-label">Enabled toolsets (comma; blank = defaults)</span><input class="control-input" id="cfg-entools" list="toolset-list" placeholder="e.g. web, terminal, file, browser"></div>
-            <div class="control-group"><span class="control-label">Disabled toolsets (comma)</span><input class="control-input" id="cfg-distools" list="toolset-list" placeholder="e.g. computer_use"></div>
+            <div class="control-group"><label class="control-label" for="cfg-supinterval">Supervisor sweep every (min) — supervisors only</label><input class="control-input" id="cfg-supinterval" type="number" min="2" placeholder="default 20"></div>
+            <div class="control-group"><label class="control-label" for="cfg-entools">Enabled toolsets (comma; blank = defaults)</label><input class="control-input" id="cfg-entools" list="toolset-list" placeholder="e.g. web, terminal, file, browser"></div>
+            <div class="control-group"><label class="control-label" for="cfg-distools">Disabled toolsets (comma)</label><input class="control-input" id="cfg-distools" list="toolset-list" placeholder="e.g. computer_use"></div>
             <datalist id="toolset-list"></datalist>
-            <div class="control-group"><span class="control-label">Role Soul (identity prompt)</span><textarea class="control-textarea" id="cfg-soul" style="min-height:120px"></textarea></div>
+            <div class="control-group"><label class="control-label" for="cfg-soul">Role Soul (identity prompt)</label><textarea class="control-textarea" id="cfg-soul" style="min-height:120px"></textarea></div>
             <div style="font-size:10px;color:var(--text-muted);line-height:1.5">Model, sampling, tools &amp; soul changes take effect on the agent's next turn (it re-initialises). Autonomous, sweep &amp; wake-up interval apply immediately. Leave a numeric field blank to use the default.</div>
             <div class="control-group" style="margin-top:12px">
-                <span class="control-label">⏰ Scheduled wake-ups (cron)</span>
+                <span class="control-label"><span data-icon="clock" data-icon-size="11"></span> Scheduled wake-ups (cron)</span>
                 <div id="cfg-crons" class="cfg-crons"><div class="cron-empty">—</div></div>
                 <div class="cron-add">
-                    <input class="control-input" id="cfg-cron-sched" placeholder="0 9 * * 1-5">
-                    <input class="control-input" id="cfg-cron-instr" placeholder="What to do when it fires (be self-contained)">
+                    <input class="control-input" id="cfg-cron-sched" placeholder="0 9 * * 1-5" aria-label="Cron schedule">
+                    <input class="control-input" id="cfg-cron-instr" placeholder="What to do when it fires (be self-contained)" aria-label="Wake-up instruction">
                     <button class="btn btn-secondary" type="button" onclick="addAgentCron()">Add</button>
                 </div>
                 <div style="font-size:10px;color:var(--text-muted);line-height:1.5;margin-top:6px">5-field cron (<code>min hour day month weekday</code>), a macro (<code>@hourly @daily @weekly @monthly</code>), or an interval (<code>@every 30m</code>, <code>@every 2h</code>). Server local time. Agents can also self-schedule via the <code>schedule_wakeup</code> tool.</div>
             </div>
-            <div class="control-group" style="margin-top:12px"><span class="control-label">📊 Live telemetry (read-only)</span><div id="cfg-telemetry" class="cfg-telemetry">No turn run yet.</div></div>
-            <div class="control-group"><span class="control-label">⌨️ Hermes CLI — run in terminal to configure this agent without the UI</span><div id="cfg-cli" class="cfg-cli">—</div></div>
+            <div class="control-group" style="margin-top:12px"><span class="control-label"><span data-icon="bar-chart" data-icon-size="11"></span> Live telemetry (read-only)</span><div id="cfg-telemetry" class="cfg-telemetry">No turn run yet.</div></div>
+            <div class="control-group"><span class="control-label"><span data-icon="terminal" data-icon-size="11"></span> Hermes CLI — run in terminal to configure this agent without the UI</span><div id="cfg-cli" class="cfg-cli">—</div></div>
         </div>
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="hideModal('modal-agent-config')">Cancel</button>
@@ -573,20 +592,20 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 
 <!-- Model Setup Modal (first-run + Model Settings) -->
 <div class="modal-bg" id="modal-setup">
-    <div class="modal" style="width:480px">
-        <div class="modal-header">🧠 Connect your model</div>
+    <div class="modal" style="width:480px" role="dialog" aria-modal="true" aria-labelledby="mh-setup">
+        <div class="modal-header" id="mh-setup"><span data-icon="cpu" data-icon-size="14"></span> Connect your model</div>
         <div class="modal-body">
             <div id="setup-detected"></div>
-            <div class="control-group"><span class="control-label">Provider</span><select class="control-select" id="setup-provider" onchange="onSetupProviderChange()"></select></div>
-            <div class="control-group" id="setup-baseurl-group"><span class="control-label">API Base URL</span><input class="control-input" id="setup-baseurl" placeholder="https://..."></div>
-            <div class="control-group"><span class="control-label">API Key</span><input class="control-input" id="setup-key" type="password" placeholder="sk-…  (stored locally, never committed)"></div>
-            <div class="control-group"><span class="control-label">Model</span><input class="control-input" id="setup-model" list="setup-model-list" placeholder="model id"><datalist id="setup-model-list"></datalist></div>
-            <div style="font-size:11px;color:var(--text-muted);line-height:1.5">This is the <b>default for all agents</b>. Override it per-agent in each agent's ⚙️ settings. Stored in Hermes config format under your data dir.</div>
+            <div class="control-group"><label class="control-label" for="setup-provider">Provider</label><select class="control-select" id="setup-provider" onchange="onSetupProviderChange()"></select></div>
+            <div class="control-group" id="setup-baseurl-group"><label class="control-label" for="setup-baseurl">API Base URL</label><input class="control-input" id="setup-baseurl" placeholder="https://..."></div>
+            <div class="control-group"><label class="control-label" for="setup-key">API Key</label><input class="control-input" id="setup-key" type="password" placeholder="sk-…  (stored locally, never committed)"></div>
+            <div class="control-group"><label class="control-label" for="setup-model">Model</label><input class="control-input" id="setup-model" list="setup-model-list" placeholder="model id"><datalist id="setup-model-list"></datalist></div>
+            <div style="font-size:11px;color:var(--text-muted);line-height:1.5">This is the <b>default for all agents</b>. Override it per-agent in each agent's settings. Stored in Hermes config format under your data dir.</div>
             <div style="border-top:1px solid var(--border);margin:16px 0 12px"></div>
-            <div class="control-group"><span class="control-label">Monitoring summary model</span><input class="control-input" id="setup-summary-model" list="setup-model-list" placeholder="(defaults to the model above)"></div>
+            <div class="control-group"><label class="control-label" for="setup-summary-model">Monitoring summary model</label><input class="control-input" id="setup-summary-model" list="setup-model-list" placeholder="(defaults to the model above)"></div>
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);cursor:pointer;margin-bottom:6px"><input type="checkbox" id="setup-digest-enabled"> Auto-summarize agent activity into status digests</label>
             <div style="font-size:11px;color:var(--text-muted);line-height:1.5">A cheap out-of-band model reads each agent's activity and writes a short rolling status — monitor a big team by digest instead of reading every chat.</div>
-            <div class="control-group" style="margin-top:12px"><span class="control-label">Vision model (screenshots &amp; GUI grounding)</span><input class="control-input" id="setup-vision-model" list="setup-model-list" placeholder=""></div>
+            <div class="control-group" style="margin-top:12px"><label class="control-label" for="setup-vision-model">Vision model (screenshots &amp; GUI grounding)</label><input class="control-input" id="setup-vision-model" list="setup-model-list" placeholder=""></div>
             <div style="font-size:11px;color:var(--text-muted);line-height:1.5">Fallback multimodal model for reading browser screenshots (<code>browser_vision</code>) and finding on-screen elements by description (<code>browser_locate</code> → coordinates for <code>browser_click_xy</code>). Used only when an agent's main model can't read images (checked automatically with a one-time probe); vision-capable main models handle their own screenshots. Must accept image input; served through the same endpoint as the default model. Applies to all agents on save.</div>
             <div id="setup-error" style="color:var(--danger);font-size:11px;margin-top:8px"></div>
         </div>
@@ -599,8 +618,8 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 
 <!-- Link Editor Modal -->
 <div class="modal-bg" id="modal-link-editor">
-    <div class="modal">
-        <div class="modal-header">Link Editor</div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-link-editor">
+        <div class="modal-header" id="mh-link-editor">Link Editor</div>
         <div class="modal-body" id="link-editor-body">
             <div class="empty-state">Loading...</div>
         </div>
@@ -612,25 +631,25 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 
 <!-- Inbox Panel -->
 <div class="inbox-overlay" id="inbox-overlay" onclick="toggleInbox()"></div>
-<div class="inbox-panel" id="inbox-panel">
+<div class="inbox-panel" id="inbox-panel" role="complementary" aria-label="Human inbox">
     <div class="inbox-header">
-        <h3>&#9993; Human Inbox</h3>
+        <h3><span data-icon="mail" data-icon-size="14"></span> Human Inbox</h3>
         <button class="btn btn-sm btn-secondary" onclick="toggleInbox()">Close</button>
     </div>
     <div class="inbox-body" id="inbox-body">
-        <div class="empty-state"><div class="empty-state-icon">&#9993;</div><div>No questions yet</div></div>
+        <div class="empty-state"><div class="empty-state-icon"><span data-icon="mail" data-icon-size="26"></span></div><div>No questions yet</div></div>
     </div>
 </div>
 
 <!-- Respond Modal -->
 <div class="modal-bg" id="modal-respond">
-    <div class="modal">
-        <div class="modal-header">Respond to <span id="respond-agent-name"></span></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-respond">
+        <div class="modal-header" id="mh-respond">Respond to <span id="respond-agent-name"></span></div>
         <div class="modal-body">
             <div style="margin-bottom:10px;font-size:12px;color:var(--text-muted)">Question:</div>
             <div id="respond-question" style="background:var(--bg);padding:10px;border-radius:5px;font-size:12px;margin-bottom:14px;border:1px solid var(--border)"></div>
             <div class="control-group">
-                <span class="control-label">Your Response</span>
+                <label class="control-label" for="respond-text">Your Response</label>
                 <textarea class="control-textarea" id="respond-text" placeholder="Type your answer..." style="min-height:80px"></textarea>
             </div>
             <input type="hidden" id="respond-qid">
@@ -644,7 +663,7 @@ input, button, select, textarea { font-family: inherit; letter-spacing: inherit;
 </div>
 
 <script>
-const WS_URL = `ws://${window.location.host}/ws`;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 const API_URL = `${window.location.protocol}//${window.location.host}`;
 
 let ws = null, reconnectTimer = null, reconnectDelay = 1000;
@@ -738,11 +757,17 @@ function initStageNav() {
 }
 
 /* ===== PANEL CHROME ===== */
-function togglePanel(id) { document.getElementById(id)?.classList.toggle('collapsed'); }
+function togglePanel(id) {
+    const p = document.getElementById(id);
+    if (!p) return;
+    p.classList.toggle('collapsed');
+    const btn = p.querySelector('.ov-collapse');
+    if (btn) btn.setAttribute('aria-expanded', String(!p.classList.contains('collapsed')));
+}
 function toggleDensity() {
     denseMode = !denseMode;
     const t = document.getElementById('density-toggle');
-    if (t) { t.textContent = denseMode ? 'detailed' : 'compact'; t.classList.toggle('on', denseMode); }
+    if (t) { t.textContent = denseMode ? 'detailed' : 'compact'; t.classList.toggle('on', denseMode); t.setAttribute('aria-pressed', String(denseMode)); }
     renderAgents();
 }
 
@@ -772,7 +797,16 @@ function setWsStatus(status, text) {
 function connectWS() {
     if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
     setWsStatus('connecting', 'Connecting...');
-    ws = new WebSocket(WS_URL);
+    try {
+        ws = new WebSocket(WS_URL);
+    } catch (err) {
+        // WebSocket construction can throw synchronously (e.g. mixed-content
+        // under HTTPS) — don't let it abort init. Fall back to polling.
+        setWsStatus('disconnected', 'Disconnected');
+        logEvent('system', `WS unavailable (${err.message}) — using polling fallback`);
+        scheduleReconnect();
+        return;
+    }
     ws.onopen = () => { setWsStatus('connected', 'Live'); reconnectDelay = 1000; logEvent('system', 'Connected'); refreshData(); };
     ws.onmessage = (e) => { try { handleWS(JSON.parse(e.data)); } catch(err) {} };
     ws.onclose = () => { setWsStatus('disconnected', 'Disconnected'); logEvent('system', 'WS closed — reconnecting...'); scheduleReconnect(); };
@@ -838,8 +872,8 @@ function handleWS(msg) {
             break;
         case 'cron_updated':
         case 'cron_fired': {
-            if (type === 'cron_fired') logEvent('system', `${payload.agent_name} ⏰ scheduled wake-up fired (${payload.schedule || ''})`);
-            else refreshData();  // keep the card's ⏰ badge in sync
+            if (type === 'cron_fired') logEvent('system', `${payload.agent_name} scheduled wake-up fired (${payload.schedule || ''})`);
+            else refreshData();  // keep the card's cron badge in sync
             // Live-refresh the schedules list if this agent's config modal is open.
             const cfgOpen = document.getElementById('modal-agent-config').classList.contains('show');
             if (cfgOpen && document.getElementById('cfg-agent-id').value === payload.agent_name) loadAgentCrons(payload.agent_name);
@@ -873,7 +907,7 @@ function handleWS(msg) {
             }
             break;
         case 'config_proposal':
-            logEvent('system', `💡 ${payload.agent_name} proposed a config change`);
+            logEvent('system', `${payload.agent_name} proposed a config change`);
             bumpInboxBadge(1);
             if (document.getElementById('inbox-panel').classList.contains('open')) loadInbox();
             break;
@@ -931,8 +965,8 @@ function renderCardDigest(digest) {
         `Risk: ${risk}`,
     ].filter(Boolean).join('\n');
     const headline = dg.headline || (dg.did && dg.did[0]) || '—';
-    const blocked = dg.blocked_on ? ` <span class="dg-blocked">⛔ ${esc(dg.blocked_on)}</span>` : '';
-    return `<div class="card-digest" title="${esc(tip)}">
+    const blocked = dg.blocked_on ? ` <span class="dg-blocked">${icon('ban', 10)} ${esc(dg.blocked_on)}</span>` : '';
+    return `<div class="card-digest" title="${escAttr(tip)}">
         <span class="risk-dot" style="background:${color}"></span>
         <span class="dg-text">${esc(headline)}${blocked}</span>
     </div>`;
@@ -941,7 +975,7 @@ function renderCardDigest(digest) {
 function renderAgents() {
     const names = Object.keys(agentData).sort();
     const el = document.getElementById('agent-list');
-    if (!names.length) { el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div><div>No agents in this team</div></div>'; return; }
+    if (!names.length) { el.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('search', 26)}</div><div>No agents in this team</div></div>`; return; }
     el.innerHTML = names.map(n => {
         const a = agentData[n]; const st = a.state || 'idle'; const sel = selectedAgent === n;
         const peers = a.config?.allowed_peers || [];
@@ -954,9 +988,9 @@ function renderAgents() {
             ? `<div class="card-ctx" title="Context ${ctxPct}% of ${(tm.context_window||0).toLocaleString()} tokens"><div class="card-ctx-fill" style="width:${Math.min(ctxPct,100)}%;background:${ctxPct>85?'var(--danger)':ctxPct>60?'var(--busy)':'var(--idle)'}"></div></div>`
             : '';
         const cr = (a.config?.crons || []).filter(c => c.enabled !== false).length;
-        const chips = `<span class="peer-tag" style="background:rgba(167,139,250,0.14);color:var(--tool)" title="Model">${esc(a.config?.model || 'litellm-model')}</span>${a.config?.autonomous ? '<span class="peer-tag" style="background:rgba(245,181,68,0.16);color:var(--busy)" title="Self-drives when idle">auto</span>' : ''}${a.config?.is_supervisor ? '<span class="peer-tag" style="background:rgba(91,157,255,0.16);color:var(--human)" title="Supervisor — watches its linked agents">👁</span>' : ''}${cr ? `<span class="peer-tag" style="background:rgba(62,207,142,0.14);color:var(--idle)" title="${cr} scheduled wake-up(s)">⏰ ${cr}</span>` : ''}`;
+        const chips = `<span class="peer-tag" style="background:rgba(167,139,250,0.14);color:var(--tool)" title="Model">${esc(a.config?.model || 'litellm-model')}</span>${a.config?.autonomous ? '<span class="peer-tag" style="background:rgba(245,181,68,0.16);color:var(--busy)" title="Self-drives when idle">auto</span>' : ''}${a.config?.is_supervisor ? `<span class="peer-tag" style="background:rgba(91,157,255,0.16);color:var(--human)" title="Supervisor — watches its linked agents">${icon('eye', 10)}</span>` : ''}${cr ? `<span class="peer-tag" style="background:rgba(62,207,142,0.14);color:var(--idle)" title="${cr} scheduled wake-up(s)">${icon('clock', 10)} ${cr}</span>` : ''}`;
         const qBadge = `<span class="queue-badge${(a.pending_count||0)>0?'':' q-zero'}" style="margin-left:auto" title="Queued tasks">${a.pending_count || 0}</span>`;
-        return `<div class="agent-card ${st} ${sel?'selected':''} ${(sel||denseMode)?'expanded':''}" onclick="selectAgent('${jsAttr(n)}')">
+        return `<div class="agent-card ${st} ${sel?'selected':''} ${(sel||denseMode)?'expanded':''}" role="button" tabindex="0" onclick="selectAgent('${jsAttr(n)}')" onkeydown="if(event.target===this&&(event.key==='Enter'||event.key===' ')){event.preventDefault();selectAgent('${jsAttr(n)}')}">
             <div class="agent-name"><span class="status-dot ${st}"></span><span class="an-text">${esc(a.config?.name || n)}</span>${qBadge}</div>
             <div class="agent-meta">${chips}</div>
             ${ctxBar}
@@ -964,13 +998,13 @@ function renderAgents() {
                 ${renderCardDigest(a.digest)}
                 <div class="agent-meta" style="margin-top:6px">${peerTags}</div>
                 <div class="agent-actions">
-                    ${(st === 'busy' || st === 'asking_human') ? `<button class="btn btn-sm" style="background:var(--danger);border-color:var(--danger);color:white" onclick="event.stopPropagation();stopAgent('${jsAttr(n)}')">■ Stop</button>` : ''}
+                    ${(st === 'busy' || st === 'asking_human') ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();stopAgent('${jsAttr(n)}')">${icon('square', 10)} Stop</button>` : ''}
                     ${st === 'paused'
-                        ? `<button class="btn btn-sm" style="background:var(--idle);border-color:var(--idle);color:white" title="Lift the freeze — agent resumes its held queue" onclick="event.stopPropagation();resumeAgent('${jsAttr(n)}')">▶ Resume</button>`
-                        : `<button class="btn btn-sm btn-secondary" title="Emergency freeze — interrupts the turn but keeps the queue" onclick="event.stopPropagation();pauseAgent('${jsAttr(n)}')">⏸ Pause</button>`}
-                    <button class="btn btn-sm btn-secondary" title="Configure (model, sampling, soul)" onclick="event.stopPropagation();showAgentConfig('${jsAttr(n)}')">⚙️</button>
-                    <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();showLinkEditorFor('${jsAttr(n)}')">🔗</button>
-                    <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removeAgent('${jsAttr(n)}')">×</button>
+                        ? `<button class="btn btn-sm btn-success" title="Lift the freeze — agent resumes its held queue" onclick="event.stopPropagation();resumeAgent('${jsAttr(n)}')">${icon('play', 10)} Resume</button>`
+                        : `<button class="btn btn-sm btn-secondary" title="Emergency freeze — interrupts the turn but keeps the queue" onclick="event.stopPropagation();pauseAgent('${jsAttr(n)}')">${icon('pause', 10)} Pause</button>`}
+                    <button class="btn btn-sm btn-secondary" title="Configure (model, sampling, soul)" aria-label="Configure agent" onclick="event.stopPropagation();showAgentConfig('${jsAttr(n)}')">${icon('settings', 12)}</button>
+                    <button class="btn btn-sm btn-secondary" title="Edit links" aria-label="Edit agent links" onclick="event.stopPropagation();showLinkEditorFor('${jsAttr(n)}')">${icon('link', 12)}</button>
+                    <button class="btn btn-sm btn-danger" aria-label="Delete agent" onclick="event.stopPropagation();removeAgent('${jsAttr(n)}')">×</button>
                 </div>
             </div>
         </div>`;
@@ -1079,7 +1113,7 @@ function renderNetwork() {
         } else {
             d = `M${ax},${ay} L${bx},${by}`;
         }
-        html += `<path class="conn ${cls}" d="${d}" fill="none" stroke="${color}" stroke-width="${width}" stroke-opacity="${opacity}"${dash?` stroke-dasharray="${dash}"`:''}${arrow?` marker-end="url(#${arrow})"`:''} data-from="${a}" data-to="${b}"/>`;
+        html += `<path class="conn ${cls}" d="${d}" fill="none" stroke="${color}" stroke-width="${width}" stroke-opacity="${opacity}"${dash?` stroke-dasharray="${dash}"`:''}${arrow?` marker-end="url(#${arrow})"`:''} data-from="${escAttr(a)}" data-to="${escAttr(b)}"/>`;
     };
 
     // Split mutual links into reporting (parent/child) vs lateral peer links.
@@ -1106,9 +1140,9 @@ function renderNetwork() {
             ? `<circle cx="${p.x}" cy="${p.y}" r="${R}" fill="${col}14" stroke="${col}" stroke-width="2" stroke-dasharray="3 3"/>`
             : `<circle cx="${p.x}" cy="${p.y}" r="${R}" fill="${col}18" stroke="${col}" stroke-width="2"/>`;
         const core = sup
-            ? `<text x="${p.x}" y="${p.y+5}" text-anchor="middle" font-size="16">👁</text>`
+            ? `<g transform="translate(${p.x-8},${p.y-8}) scale(0.667)" fill="none" stroke="${col}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" pointer-events="none">${ICONS['eye']}</g>`
             : `<circle cx="${p.x}" cy="${p.y}" r="5" fill="${col}">${st==='busy'?'<animate attributeName="r" values="5;9;5" dur="1.4s" repeatCount="indefinite"/>':''}</circle>`;
-        html += `<g onclick="selectAgent('${jsAttr(n)}')" style="cursor:pointer"><title>${esc(full)}${sup?' (supervisor)':''}</title>
+        html += `<g onclick="selectAgent('${jsAttr(n)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectAgent('${jsAttr(n)}')}" role="button" tabindex="0" style="cursor:pointer"><title>${esc(full)}${sup?' (supervisor)':''}</title>
             ${ring}${core}
             <text x="${p.x}" y="${p.y+R+14}" text-anchor="middle" fill="#ECECEE" font-size="10.5" font-weight="700" font-family="Manrope, sans-serif">${esc(label)}</text>
             <text x="${p.x}" y="${p.y+R+27}" text-anchor="middle" fill="#8A8A93" font-size="9.5" font-family="JetBrains Mono, monospace">Q:${agentData[n]?.pending_count||0}</text></g>`;
@@ -1166,7 +1200,7 @@ function animateParticle(fromAgent, toAgent) {
 function renderQueues() {
     const el = document.getElementById('queue-bars');
     const names = Object.keys(agentData).sort();
-    if (!names.length) { el.innerHTML = '<div class="empty-state" style="padding:16px"><div class="empty-state-icon">📊</div><div>No data</div></div>'; return; }
+    if (!names.length) { el.innerHTML = `<div class="empty-state" style="padding:16px"><div class="empty-state-icon">${icon('bar-chart', 26)}</div><div>No data</div></div>`; return; }
     const max = Math.max(1, ...names.map(n => agentData[n]?.pending_count || 0));
     el.innerHTML = names.map(n => {
         const a = agentData[n] || {};
@@ -1225,9 +1259,11 @@ async function loadAgentDigests(name) {
     document.getElementById('msg-header').textContent = `Digests: ${agentData[name]?.config?.name || name}`;
     try {
         const d = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}/digests?limit=100`).then(r => r.json());
+        // Stale-response guard: bail if the selection changed during the await.
+        if (selectedAgent !== name) return;
         renderDigestTimeline(name, d.digests || []);
     } catch (e) {
-        el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div>Failed to load digests</div></div>';
+        el.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('alert', 26)}</div><div>Failed to load digests</div></div>`;
     }
 }
 
@@ -1235,7 +1271,7 @@ function renderDigestTimeline(name, digests) {
     const el = document.getElementById('digest-list');
     document.getElementById('msg-count').textContent = digests.length;
     if (!digests.length) {
-        el.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🧭</div><div>No digests yet</div><div style="font-size:11px;color:var(--text-muted);margin-top:6px;max-width:280px;line-height:1.5">A rolling status summary is written automatically once this agent accrues new activity.</div></div>';
+        el.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('compass', 26)}</div><div>No digests yet</div><div style="font-size:11px;color:var(--text-muted);margin-top:6px;max-width:280px;line-height:1.5">A rolling status summary is written automatically once this agent accrues new activity.</div></div>`;
         return;
     }
     // Newest first — the sequence of rolling status snapshots over time.
@@ -1317,33 +1353,33 @@ function renderExecTrace() {
     const container = document.getElementById('exec-trace');
     if (!container) return;
     if (!selectedAgent) {
-        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚡</div><div>Select an agent</div></div>';
+        container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('zap', 26)}</div><div>Select an agent</div></div>`;
         return;
     }
     const steps = execTrace[selectedAgent] || [];
     const answer = execAnswer[selectedAgent] || '';
     const status = execStatus[selectedAgent];
     if (!steps.length && !answer && !status) {
-        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚡</div><div>Idle — the next turn will stream here live (thinking → tools → answer).</div></div>';
+        container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('zap', 26)}</div><div>Idle — the next turn will stream here live (thinking → tools → answer).</div></div>`;
         return;
     }
     let html = '';
     steps.forEach(s => {
         if (s.type === 'system') {
-            html += `<div class="exec-step sysmsg"><div class="exec-label" style="cursor:pointer" onclick="this.nextElementSibling.classList.toggle('collapsed')">⚙️ System context · click to expand</div><pre class="collapsed" style="max-height:200px">${esc(s.text)}</pre></div>`;
+            html += `<div class="exec-step sysmsg"><button class="bare exec-label" aria-expanded="false" onclick="toggleNext(this)">${icon('settings', 11)} System context · click to expand</button><pre class="collapsed" style="max-height:200px">${esc(s.text)}</pre></div>`;
         } else if (s.type === 'user') {
-            html += `<div class="exec-step usermsg"><div class="exec-label">👤 User / Task</div><pre>${esc(s.text)}</pre></div>`;
+            html += `<div class="exec-step usermsg"><div class="exec-label">${icon('user', 11)} User / Task</div><pre>${esc(s.text)}</pre></div>`;
         } else if (s.type === 'reasoning') {
-            html += `<div class="exec-step reasoning"><div class="exec-label">🧠 Thinking</div><div class="md">${mdToHtml(s.text)}</div></div>`;
+            html += `<div class="exec-step reasoning"><div class="exec-label">${icon('brain', 11)} Thinking</div><div class="md">${mdToHtml(s.text)}</div></div>`;
         } else if (s.type === 'tool') {
             const obs = s.result != null
                 ? `<div class="exec-obs"><strong>↳ Output</strong><pre>${esc(s.result)}</pre></div>`
                 : '<div class="exec-obs"><em style="color:var(--text-muted)">running…</em></div>';
-            html += `<div class="exec-step tool"><div class="exec-label">🔧 Tool Call · ${esc(s.name || 'tool')}</div><pre>${esc(s.args)}</pre>${obs}</div>`;
+            html += `<div class="exec-step tool"><div class="exec-label">${icon('wrench', 11)} Tool Call · ${esc(s.name || 'tool')}</div><pre>${esc(s.args)}</pre>${obs}</div>`;
         }
     });
     if (answer) {
-        html += `<div class="exec-step answer"><div class="exec-label">✍️ Response</div><div class="md" style="margin-top:6px;word-break:break-word">${mdToHtml(answer)}</div></div>`;
+        html += `<div class="exec-step answer"><div class="exec-label">${icon('pen', 11)} Response</div><div class="md" style="margin-top:6px;word-break:break-word">${mdToHtml(answer)}</div></div>`;
     }
     if (status) {
         html += `<div class="exec-status"><span class="live-dot"></span>${esc(status)}</div>`;
@@ -1376,7 +1412,7 @@ async function showAgentConfig(name) {
         const opts = [...new Set([...(models || []), cfg.model].filter(Boolean))];
         const defLabel = cfg.effective_model ? `(Use team default — ${cfg.effective_model})` : '(Use team default)';
         modelSel.innerHTML = `<option value="">${esc(defLabel)}</option>`
-            + opts.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+            + opts.map(m => `<option value="${escAttr(m)}">${esc(m)}</option>`).join('');
         modelSel.value = cfg.model || '';   // empty = inherit the swarm default
         document.getElementById('cfg-autonomous').checked = !!cfg.autonomous;
         document.getElementById('cfg-sweep').value = cfg.sweep_interval ?? '';
@@ -1397,7 +1433,7 @@ async function showAgentConfig(name) {
         document.getElementById('cfg-cron-sched').value = '';
         document.getElementById('cfg-cron-instr').value = '';
         loadAgentCrons(name);
-        document.getElementById('modal-agent-config').classList.add('show');
+        showModal('modal-agent-config');
     } catch (e) { logEvent('error', e.message); }
 }
 
@@ -1426,8 +1462,8 @@ async function loadToolsets() {
         const d = await r.json();
         const dl = document.getElementById('toolset-list');
         if (dl) {
-            const sets = (d.toolsets || []).map(ts => `<option value="${esc(ts.name)}">${esc(ts.description || '')}</option>`);
-            const swarm = (d.swarm_tools || []).map(ts => `<option value="${esc(ts.name)}">swarm tool${ts.required ? ' (required)' : ''} — ${esc(ts.description || '')}</option>`);
+            const sets = (d.toolsets || []).map(ts => `<option value="${escAttr(ts.name)}">${esc(ts.description || '')}</option>`);
+            const swarm = (d.swarm_tools || []).map(ts => `<option value="${escAttr(ts.name)}">swarm tool${ts.required ? ' (required)' : ''} — ${esc(ts.description || '')}</option>`);
             dl.innerHTML = sets.concat(swarm).join('');
         }
     } catch (e) { /* non-fatal */ }
@@ -1445,13 +1481,13 @@ async function loadAgentCli(name) {
             <div class="cli-row">
                 <span class="cli-label">${esc(c.label)}</span>
                 <code>${esc(c.cmd)}</code>
-                <span class="cli-copy" title="Copy" onclick="copyText(this, ${JSON.stringify(c.cmd).replace(/"/g,'&quot;')})">⧉</span>
+                <button class="bare cli-copy" title="Copy" aria-label="Copy command" onclick="copyText(this, ${JSON.stringify(c.cmd).replace(/"/g,'&quot;')})">${icon('copy', 12)}</button>
             </div>`).join('');
     } catch (e) { if (el) el.textContent = 'Could not load CLI commands.'; }
 }
 
 function copyText(elm, text) {
-    try { navigator.clipboard.writeText(text); const o = elm.textContent; elm.textContent = '✓'; setTimeout(() => elm.textContent = o, 1000); }
+    try { navigator.clipboard.writeText(text); const o = elm.innerHTML; elm.textContent = '✓'; setTimeout(() => elm.innerHTML = o, 1000); }
     catch (e) { logEvent('error', 'Copy failed'); }
 }
 
@@ -1489,7 +1525,7 @@ function renderCrons(name, crons) {
             </div>
             <div class="cron-actions">
                 <label class="cfg-check" title="Enable / disable"><input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleAgentCron(${nm}, ${cid}, this.checked)"></label>
-                <span class="cron-del" title="Delete" onclick="deleteAgentCron(${nm}, ${cid})">🗑</span>
+                <button class="bare cron-del" title="Delete" aria-label="Delete schedule" onclick="deleteAgentCron(${nm}, ${cid})">${icon('trash', 12)}</button>
             </div>
         </div>`;
     }).join('');
@@ -1591,7 +1627,7 @@ async function showModelSettings(firstRun) {
     const detected = status.detected_hermes;
 
     const provSel = document.getElementById('setup-provider');
-    provSel.innerHTML = setupProviders.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+    provSel.innerHTML = setupProviders.map(p => `<option value="${escAttr(p.id)}">${esc(p.label)}</option>`).join('');
 
     const det = document.getElementById('setup-detected');
     if (detected && detected.model) {
@@ -1619,7 +1655,7 @@ async function showModelSettings(firstRun) {
         vis.value = s.vision_model || '';
         vis.placeholder = s.vision_model_default ? `(default: ${s.vision_model_default})` : '(multimodal model id)';
     } catch (e) { /* non-fatal */ }
-    document.getElementById('modal-setup').classList.add('show');
+    showModal('modal-setup');
 }
 
 function onSetupProviderChange() {
@@ -1635,7 +1671,7 @@ function onSetupProviderChange() {
         baseInput.value = p.base_url || '';
         baseInput.readOnly = !p.needs_base_url;  // editable only for "custom"
     }
-    document.getElementById('setup-model-list').innerHTML = (p.models || []).map(m => `<option value="${esc(m)}">`).join('');
+    document.getElementById('setup-model-list').innerHTML = (p.models || []).map(m => `<option value="${escAttr(m)}">`).join('');
     const modelInput = document.getElementById('setup-model');
     if ((p.models || []).length && !modelInput.value) modelInput.value = p.models[0];
     // OAuth providers can't be set up by pasting a key — point to the terminal.
@@ -1643,7 +1679,7 @@ function onSetupProviderChange() {
     err.style.color = 'var(--danger)'; err.textContent = '';
     if (p.auth_type && p.auth_type !== 'api_key') {
         err.style.color = 'var(--busy)';
-        err.textContent = 'This provider uses OAuth login — configure it in a terminal (HERMES_HOME=… hermes setup model; see an agent’s ⚙️ → Hermes CLI), then adopt it here.';
+        err.textContent = 'This provider uses OAuth login — configure it in a terminal (HERMES_HOME=… hermes setup model; see an agent’s settings → Hermes CLI), then adopt it here.';
     }
 }
 
@@ -1696,35 +1732,39 @@ function messageBlockHTML(m) {
     const ts = fmtMsgTime(m.timestamp);
     if (role === 'compaction_summary') {
         return `<div class="cc-checkpoint" data-compaction="1">
-            <div class="cc-divider" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+            <button class="bare cc-divider" aria-expanded="false" onclick="toggleNext(this)">
                 <span class="cc-label">⟳ Context compacted</span>
                 <span class="cc-time">${ts} · everything above was summarized · click to view</span>
-            </div>
+            </button>
             <div class="cc-body collapsed">${esc(m.content || '')}</div>
         </div>`;
     }
     const hasToolCall = (m.content || '').startsWith('🛠️ Tool Calls:') || (m.tool_calls && m.tool_calls.length);
     return `<div class="msg-block">
-        <div class="msg-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+        <button class="bare msg-header" aria-expanded="false" onclick="toggleNext(this)">
             <span class="msg-role-badge ${role}">${esc(role)}</span>
             <span style="font-size:10px;color:var(--text-muted)">${esc((m.task_id || '').slice(0, 8))}</span>
-            ${hasToolCall ? '<span style="font-size:10px;color:var(--tool);margin-left:4px">🔧 tools</span>' : ''}
+            ${hasToolCall ? `<span style="font-size:10px;color:var(--tool);margin-left:4px">${icon('wrench', 10)} tools</span>` : ''}
             <span class="msg-time">${ts}</span>
-        </div>
+        </button>
         <div class="msg-body collapsed">${formatMessageContent(m)}</div>
     </div>`;
 }
 
 async function loadMessages(agentName) {
     try {
-        const res = await fetch(`${API_URL}/monitoring/agents/${agentName}/messages?limit=300`);
+        const res = await fetch(`${API_URL}/monitoring/agents/${encodeURIComponent(agentName)}/messages?limit=300`);
+        if (!res.ok) return;
         const data = await res.json();
+        // Stale-response guard: if the selection changed during the await,
+        // don't clobber the DOM with results for the previous agent.
+        if (selectedAgent !== agentName) return;
         const container = document.getElementById('message-list');
         if (viewMode === 'history') document.getElementById('msg-header').textContent = `Messages: ${agentData[agentName]?.config?.name || agentName}`;
         // Endpoint returns newest-first; render chronologically (oldest → newest).
         const msgs = (data.messages || []).slice().reverse();
         if (!msgs.length) {
-            container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">💬</div><div>No messages</div></div>';
+            container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('message-square', 26)}</div><div>No messages</div></div>`;
             document.getElementById('msg-count').textContent = '0';
             return;
         }
@@ -1759,7 +1799,12 @@ function logEvent(type, message) {
     updateStats();
 }
 
-function toggleLog() { document.getElementById('event-log').classList.toggle('collapsed'); }
+function toggleLog() {
+    const p = document.getElementById('event-log');
+    p.classList.toggle('collapsed');
+    const btn = document.getElementById('log-toggle');
+    if (btn) btn.setAttribute('aria-expanded', String(!p.classList.contains('collapsed')));
+}
 function clearLog() { document.getElementById('event-log-body').innerHTML = ''; eventCount = 0; updateStats(); }
 
 /* ===== STATS & INTERACTION ===== */
@@ -1783,14 +1828,17 @@ function updateTarget() {
     const tgt = document.getElementById('ctrl-target');
     if (!tgt) return;  // target dropdown removed — messages go to the selected agent
     const names = Object.keys(agentData).sort();
-    tgt.innerHTML = names.map(n => `<option value="${n}">${esc(agentData[n]?.config?.name || n)}</option>`).join('');
+    tgt.innerHTML = names.map(n => `<option value="${escAttr(n)}">${esc(agentData[n]?.config?.name || n)}</option>`).join('');
 }
 
 async function refreshData() {
+    const team = currentTeam;  // capture selection at call start
     try {
-        const url = currentTeam ? `${API_URL}/monitoring/agents?team_id=${encodeURIComponent(currentTeam)}` : `${API_URL}/monitoring/agents`;
+        const url = team ? `${API_URL}/monitoring/agents?team_id=${encodeURIComponent(team)}` : `${API_URL}/monitoring/agents`;
         const res = await fetch(url);
         const data = await res.json();
+        // Stale-response guard: drop the result if the team changed mid-flight.
+        if (currentTeam !== team) return;
         if (data.agents) {
             // Full replace, not merge — so deleted agents disappear
             agentData = data.agents;
@@ -1805,9 +1853,9 @@ async function sendTask() {
     if (!payload) return;
     if (!target) { logEvent('error', 'Select an agent first'); return; }
     try {
-        const res = await fetch(`${API_URL}/agent/${target}/task`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({from_agent:'human_operator', payload}) });
-        const data = await res.json();
-        if (data.error) logEvent('error', `Send failed: ${data.error}`);
+        const res = await fetch(`${API_URL}/agent/${encodeURIComponent(target)}/task`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({from_agent:'human_operator', payload}) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) logEvent('error', `Send failed: ${data.error || res.status}`);
         else { logEvent('task_enqueued', `Manual → ${target}`); document.getElementById('ctrl-payload').value = ''; }
     } catch (e) { logEvent('error', `Send failed: ${e.message}`); }
 }
@@ -1817,6 +1865,13 @@ function esc(s) {
     const div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
+}
+
+// Quote-safe escaper for values interpolated into double-quoted HTML
+// attributes via innerHTML. esc() escapes & < > but NOT quotes, so a `"` in
+// LLM/user data can break out of the attribute and inject a handler (XSS).
+function escAttr(s) {
+    return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Minimal, XSS-safe markdown → HTML for agent/LLM output. Everything is
@@ -1845,7 +1900,7 @@ function mdToHtml(raw) {
         .replace(/(^|[^\w_])_([^_\n]+?)_(?=[^\w]|$)/g, '$1<em>$2</em>')
         .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
         .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*)\)/g,
-            '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+            (m, text, url) => `<a href="${escAttr(url)}" target="_blank" rel="noopener noreferrer">${text}</a>`);
     // 5) Block assembly, line by line (headings, lists, quotes, rules, paras).
     const lines = src.split('\n');
     let html = '', listType = null, para = [];
@@ -1883,6 +1938,61 @@ function jsAttr(s) {
         .replace(/>/g, '&gt;');
 }
 
+/* ===== ICONS =====
+   Single inline-SVG icon set (Lucide-style strokes, currentColor) - replaces
+   emoji so glyphs render identically everywhere and inherit text color.
+   Static markup uses <span data-icon="name">, hydrated once at boot;
+   dynamic renderers call icon() directly. */
+const ICONS = {
+    'mail': '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+    'cpu': '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/>',
+    'trash': '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
+    'link': '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    'chevron-down': '<polyline points="6 9 12 15 18 9"/>',
+    'search': '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+    'message-square': '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    'zap': '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    'compass': '<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
+    'history': '<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>',
+    'bar-chart': '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+    'terminal': '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+    'clock': '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    'settings': '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+    'eye': '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+    'lightbulb': '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1.3.5 2.6 1.5 3.5.8.8 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
+    'wrench': '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+    'brain': '<path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>',
+    'pen': '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+    'user': '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    'copy': '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    'maximize': '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
+    'alert': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+    'play': '<polygon points="6 3 20 12 6 21 6 3"/>',
+    'pause': '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+    'square': '<rect x="5" y="5" width="14" height="14" rx="2"/>',
+    'ban': '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+};
+
+function icon(name, size = 14) {
+    const body = ICONS[name];
+    if (!body) return '';
+    return `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+}
+
+function hydrateIcons(root = document) {
+    root.querySelectorAll('[data-icon]').forEach(el => {
+        el.innerHTML = icon(el.dataset.icon, parseInt(el.dataset.iconSize || '14', 10));
+    });
+}
+
+// Expand/collapse the element after a toggle button, keeping aria-expanded honest.
+function toggleNext(btn) {
+    const body = btn.nextElementSibling;
+    if (!body) return;
+    body.classList.toggle('collapsed');
+    btn.setAttribute('aria-expanded', String(!body.classList.contains('collapsed')));
+}
+
 /* ===== SWEEP TIMER ===== */
 function updateSweepTimer() {
     const el = document.getElementById('sweep-timer');
@@ -1905,7 +2015,7 @@ async function loadTeams() {
         const data = await res.json();
         const sel = document.getElementById('team-select');
         teamsCache = data.teams || [];
-        sel.innerHTML = teamsCache.map(t => `<option value="${t.id}">${esc(t.name)} (${t.agent_count})</option>`).join('');
+        sel.innerHTML = teamsCache.map(t => `<option value="${escAttr(t.id)}">${esc(t.name)} (${t.agent_count})</option>`).join('');
         if (!currentTeam && teamsCache.length) {
             currentTeam = teamsCache[0].id;
             sel.value = currentTeam;
@@ -1921,9 +2031,26 @@ function changeTeam(teamId) {
     refreshData();
 }
 
-function showAddTeam() { document.getElementById('modal-add-team').classList.add('show'); }
-function showAddAgent() { document.getElementById('modal-add-agent').classList.add('show'); }
-function hideModal(id) { document.getElementById(id).classList.remove('show'); }
+function showAddTeam() { showModal('modal-add-team'); }
+function showAddAgent() { showModal('modal-add-agent'); }
+
+/* Open/close modals with focus management: remember the opener, move focus
+   into the dialog, and return it on close (WCAG 2.4.3). */
+let _modalReturnFocus = null;
+function showModal(id) {
+    const bg = document.getElementById(id);
+    if (!bg) return;
+    _modalReturnFocus = document.activeElement;
+    bg.classList.add('show');
+    const first = bg.querySelector('input:not([type=hidden]), select, textarea, button');
+    if (first) first.focus();
+}
+function hideModal(id) {
+    const bg = document.getElementById(id);
+    if (bg) bg.classList.remove('show');
+    if (_modalReturnFocus && document.body.contains(_modalReturnFocus)) _modalReturnFocus.focus();
+    _modalReturnFocus = null;
+}
 
 async function doAddTeam() {
     const id = document.getElementById('add-team-id').value.trim();
@@ -1972,13 +2099,13 @@ async function doAddAgent() {
 async function removeAgent(name) {
     if (!confirm(`Permanently delete agent "${name}"? All data will be lost.`)) return;
     try {
-        const res = await fetch(`${API_URL}/agent/${name}`, { method: 'DELETE' });
+        const res = await fetch(`${API_URL}/agent/${encodeURIComponent(name)}`, { method: 'DELETE' });
         const data = await res.json();
         if (data.error) { logEvent('error', data.error); return; }
         logEvent('system', `Agent deleted: ${name}`);
         if (selectedAgent === name) {
             selectedAgent = null;
-            document.getElementById('message-list').innerHTML = '<div class="empty-state"><div class="empty-state-icon">💬</div><div>Select an agent</div></div>';
+            document.getElementById('message-list').innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('message-square', 26)}</div><div>Select an agent</div></div>`;
             document.getElementById('msg-header').textContent = 'Messages';
             document.getElementById('msg-count').textContent = '0';
         }
@@ -2022,15 +2149,15 @@ async function resumeAgent(name) {
 }
 
 /* ===== LINK EDITOR ===== */
-function showLinkEditor() { renderLinkEditor(); document.getElementById('modal-link-editor').classList.add('show'); }
-function showLinkEditorFor(agentName) { renderLinkEditor(agentName); document.getElementById('modal-link-editor').classList.add('show'); }
+function showLinkEditor() { renderLinkEditor(); showModal('modal-link-editor'); }
+function showLinkEditorFor(agentName) { renderLinkEditor(agentName); showModal('modal-link-editor'); }
 
 function renderLinkEditor(preselectAgent) {
     const names = Object.keys(agentData).sort();
     const body = document.getElementById('link-editor-body');
     if (names.length < 2) { body.innerHTML = '<div class="empty-state">Need at least 2 agents to create links</div>'; return; }
 
-    const selectOpts = names.map(n => `<option value="${n}">${esc(agentData[n]?.config?.name || n)}</option>`).join('');
+    const selectOpts = names.map(n => `<option value="${escAttr(n)}">${esc(agentData[n]?.config?.name || n)}</option>`).join('');
     let html = '<div style="margin-bottom:12px;font-size:12px;color:var(--text-muted)">Click a peer tag to toggle the link.</div>';
 
     names.forEach(n => {
@@ -2050,11 +2177,11 @@ async function toggleLink(from, to) {
     const currentlyLinked = (agentData[from]?.config?.allowed_peers || []).includes(to);
     try {
         if (currentlyLinked) {
-            const res = await fetch(`${API_URL}/agent/${from}/peers/${to}`, { method: 'DELETE' });
+            const res = await fetch(`${API_URL}/agent/${encodeURIComponent(from)}/peers/${encodeURIComponent(to)}`, { method: 'DELETE' });
             const data = await res.json();
             if (data.error) { logEvent('error', data.error); return; }
         } else {
-            const res = await fetch(`${API_URL}/agent/${from}/peers`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({peers: [...(agentData[from]?.config?.allowed_peers || []), to]}) });
+            const res = await fetch(`${API_URL}/agent/${encodeURIComponent(from)}/peers`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({peers: [...(agentData[from]?.config?.allowed_peers || []), to]}) });
             const data = await res.json();
             if (data.error) { logEvent('error', data.error); return; }
         }
@@ -2098,7 +2225,7 @@ function renderInbox() {
     const body = document.getElementById('inbox-body');
     let html = '';
     if (inboxProposals.length) {
-        html += '<div class="inbox-section-title">💡 Config Proposals</div>';
+        html += `<div class="inbox-section-title">${icon('lightbulb', 11)} Config Proposals</div>`;
         html += inboxProposals.map(p => {
             const ts = new Date(p.timestamp * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
             const agent = agentData[p.agent_name]?.config?.name || p.agent_name;
@@ -2112,10 +2239,10 @@ function renderInbox() {
                 ${actions}
             </div>`;
         }).join('');
-        html += '<div class="inbox-section-title" style="margin-top:14px">&#9993; Questions</div>';
+        html += `<div class="inbox-section-title" style="margin-top:14px">${icon('mail', 11)} Questions</div>`;
     }
     if (!inboxQuestions.length && !inboxProposals.length) {
-        body.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#9993;</div><div>No questions or proposals yet</div></div>';
+        body.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('mail', 26)}</div><div>No questions or proposals yet</div></div>`;
         return;
     }
     if (!inboxQuestions.length) {
@@ -2168,7 +2295,7 @@ function openRespondModal(qid) {
     document.getElementById('respond-text').value = '';
     document.getElementById('respond-qid').value = q.id;
     document.getElementById('respond-agent').value = q.agent_name;
-    document.getElementById('modal-respond').classList.add('show');
+    showModal('modal-respond');
 }
 
 async function submitResponse() {
@@ -2213,6 +2340,7 @@ async function rejectProposal(pid) {
 
 /* ===== INIT ===== */
 document.addEventListener('DOMContentLoaded', () => {
+    hydrateIcons();
     initStageNav();
     applyView();
     // Keep the network framed when the window resizes.
@@ -2222,13 +2350,23 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTeams();
     loadModels();
     checkSetup();
-    // Dismiss modals by clicking the backdrop or pressing Escape.
+    // Dismiss modals by clicking the backdrop or pressing Escape; trap Tab
+    // inside the open dialog so keyboard focus can't escape behind the backdrop.
     document.querySelectorAll('.modal-bg').forEach(bg => {
-        bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('show'); });
+        bg.addEventListener('click', e => { if (e.target === bg) hideModal(bg.id); });
+        bg.addEventListener('keydown', e => {
+            if (e.key !== 'Tab') return;
+            const f = [...bg.querySelectorAll('input:not([type=hidden]):not([disabled]), select, textarea, button:not([disabled])')]
+                .filter(el => el.offsetParent !== null);
+            if (!f.length) return;
+            const first = f[0], last = f[f.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        });
     });
     document.addEventListener('keydown', e => {
         if (e.key !== 'Escape') return;
-        document.querySelectorAll('.modal-bg.show').forEach(m => m.classList.remove('show'));
+        document.querySelectorAll('.modal-bg.show').forEach(m => hideModal(m.id));
         const inbox = document.getElementById('inbox-panel');
         if (inbox && inbox.classList.contains('open')) toggleInbox();
     });

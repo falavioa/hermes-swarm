@@ -67,6 +67,23 @@ AGENT_STATE_BUSY = "busy"
 AGENT_STATE_ASKING_HUMAN = "asking_human"
 AGENT_STATE_PAUSED = "paused"
 
+# Stable substring of every task-prompt preamble. Used to locate this turn's
+# output boundary in the returned message list (see _process_tasks_batch), so it
+# must stay in sync with the `combined` preamble that carries it.
+_TASK_PROMPT_MARKER = "new message(s) to process"
+
+# Backoff between retries of a turn that failed for INFRA reasons (provider down,
+# billing, network). Grows per consecutive miss so a sustained outage doesn't
+# spin the sweep loop; capped so recovery is still picked up promptly.
+INFRA_RETRY_BACKOFF_BASE_SECONDS = 15.0
+INFRA_RETRY_BACKOFF_MAX_SECONDS = 300.0
+
+# How long a stop waits for an interrupted turn's worker thread to unwind before
+# giving up and proceeding. interrupt() only lands at the next tool boundary, so
+# a turn wedged in a long blocking tool call can exceed this; we bound the wait
+# so the operator's stop never hangs.
+STOP_DRAIN_TIMEOUT_SECONDS = 30.0
+
 # Senders that are control-plane injections, not real work arriving. A message
 # from anyone else (a peer, a human) is "real activity" and resets the idle
 # heartbeat backoff.
@@ -209,6 +226,59 @@ def _reset_hermes_home_override(token: Optional[Any]) -> None:
         pass
 
 
+# ── Per-thread TERMINAL_CWD ───────────────────────────────────────────────
+# Hermes resolves the terminal/file working directory from os.getenv(
+# "TERMINAL_CWD") at *tool-call time* (terminal_tool, tool_executor, file_tools)
+# and — unlike HERMES_HOME — exposes NO ContextVar override for it. A single
+# process-global env var means the last agent to set it wins, so a peer agent's
+# terminal/file ops would run in the wrong team's repo while another team's turn
+# is in flight. We make TERMINAL_CWD resolve *per worker thread* instead: each
+# agent's dedicated worker thread sets its own value (see _run_conversation_
+# blocking), and every os.getenv/os.environ.get read returns that thread's value.
+_terminal_cwd_tls = threading.local()
+_TERMINAL_CWD_KEY = "TERMINAL_CWD"
+
+
+class _ThreadAwareEnviron(type(os.environ)):
+    """os.environ that resolves TERMINAL_CWD from a per-thread override.
+
+    All Hermes readers use ``.get()`` / ``os.getenv()`` (never subscript), both of
+    which funnel through ``__getitem__``; overriding it covers every reader while
+    leaving writes, subprocess inheritance, and all other keys untouched.
+    """
+
+    def __getitem__(self, key):
+        if key == _TERMINAL_CWD_KEY:
+            v = getattr(_terminal_cwd_tls, "value", None)
+            if v is not None:
+                return v
+        return super().__getitem__(key)
+
+
+def _install_thread_aware_terminal_cwd() -> None:
+    cur = os.environ
+    if isinstance(cur, _ThreadAwareEnviron):
+        return
+    try:
+        os.environ = _ThreadAwareEnviron(
+            cur._data, cur.encodekey, cur.decodekey, cur.encodevalue, cur.decodevalue
+        )
+    except Exception as e:  # pragma: no cover - defensive; keep the global env usable
+        log.warning("Could not install thread-aware TERMINAL_CWD (%s)", e)
+
+
+_install_thread_aware_terminal_cwd()
+
+
+def _set_terminal_cwd_override(path: Any) -> None:
+    """Pin TERMINAL_CWD for the current (worker) thread only."""
+    _terminal_cwd_tls.value = str(path)
+
+
+def _reset_terminal_cwd_override() -> None:
+    _terminal_cwd_tls.value = None
+
+
 class AgentDaemon:
     def __init__(self, name: str, cfg: Dict[str, Any]) -> None:
         self.name = name
@@ -278,6 +348,12 @@ class AgentDaemon:
         # Throttle for the "LLM provider unreachable" UI message so a sustained
         # outage doesn't post one error per 10s sweep tick.
         self._last_llm_error_emit = 0.0
+        # Infra-failure retry backoff. requeue_no_penalty doesn't burn the retry
+        # budget, but the sweep's "more pending? wake now" path would otherwise
+        # re-attempt instantly — a tight loop hammering a down provider. Hold off
+        # draining until this wall-clock time; the wait grows per consecutive miss.
+        self._infra_hold_until = 0.0
+        self._infra_misses = 0
         # Per-agent sweep interval (falls back to the global default). Lets the UI
         # tune how often a specific agent polls its queue.
         self._sweep_interval = self._resolve_sweep_interval(cfg)
@@ -398,10 +474,24 @@ class AgentDaemon:
         timeout) rather than the task's fault — these should wait for recovery
         instead of burning the retry budget and dead-lettering during an outage."""
         e = (err or "").lower()
+        # Deterministic, task-caused failures are excluded FIRST even when their
+        # text happens to contain an infra-ish word (e.g. 'LLM call failed after 3
+        # attempts: maximum context length exceeded') — otherwise a poison batch
+        # would be requeued penalty-free forever and never reach the dead-letter.
+        deterministic = (
+            "context length", "context_length", "maximum context", "too many tokens",
+            "max_tokens", "string too long", "invalid request", "invalid_request",
+            "bad request", "400", "401", "403", "404", "422",
+            "content policy", "content_policy", "content filter", "moderation",
+            "unsupported", "not found", "does not exist", "no such model",
+        )
+        if any(s in e for s in deterministic):
+            return False
         return any(s in e for s in (
             "connection error", "apiconnection", "connection refused",
             "billing or credits", "credits exhausted", "timeout", "timed out",
             "max retries", "failed after", "service unavailable", "502", "503", "504",
+            "rate limit", "overloaded", "temporarily unavailable", "econnreset",
         ))
 
     def _write_soul_md(self, content: str) -> None:
@@ -458,8 +548,12 @@ class AgentDaemon:
                 # file ops resolve against (Hermes reads it at tool-call time), so
                 # every agent on the team operates in the same real repo instead of
                 # a private folder. Also creates + git-inits the dir on first use.
+                # Scoped per worker thread (see _set_terminal_cwd_override) so a
+                # concurrent peer turn can't redirect this agent's ops; pinned again
+                # here for the AIAgent init that reads it (agent_init.working_dir).
                 project_dir = _ensure_project_dir(team_id)
-                os.environ["TERMINAL_CWD"] = str(project_dir)
+                self._project_dir = project_dir
+                _set_terminal_cwd_override(project_dir)
 
                 cdp_url = team_browser_manager.ensure_team_browser(team_id)
 
@@ -608,7 +702,9 @@ class AgentDaemon:
                 # Optional swarm tools can be turned off per agent via
                 # disabled_toolsets (the dashboard picker lists them). send_peer_message
                 # is REQUIRED (turn-ending relies on it) and is never disabled.
-                disabled = set(self.cfg.get("disabled_toolsets") or [])
+                # Reuse the normalized list (dis_ts) so a comma-string config form
+                # isn't turned into a set of individual characters by set("a,b").
+                disabled = set(dis_ts or [])
                 if "send_peer_message" not in existing_names:
                     self._ai_agent.tools = list(self._ai_agent.tools or [])
                     self._ai_agent.tools.append(_SEND_PEER_MESSAGE_TOOL_SCHEMA)
@@ -873,12 +969,37 @@ class AgentDaemon:
         if drained:
             log.info("[%s] Drained %d pending task(s) on stop", self.name, len(drained))
 
-        # Replace the executor so future sweeps run on a clean thread.
+        # Replace the executor so future sweeps run on a clean thread, then WAIT
+        # for the old worker thread to actually unwind before continuing. Without
+        # the wait, the interrupted turn (interrupt() only lands at the next tool
+        # boundary) could still be writing the shared session DB — and would see
+        # _stop_requested flipped back to False below — while a new turn starts on
+        # the same session, interleaving history. Offloaded to a default thread so
+        # the event loop isn't blocked; bounded so a turn wedged in a long blocking
+        # tool call can't hang the stop (it then finishes harmlessly in the bg).
         old_executor = self._executor
-        old_executor.shutdown(wait=False)
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix=f"agent-{self.name}"
         )
+        try:
+            await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    None, old_executor.shutdown, True
+                ),
+                timeout=STOP_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            log.warning("[%s] In-flight turn still unwinding at stop — proceeding; "
+                        "it will finish in the background", self.name)
+        except Exception as e:
+            log.debug("[%s] executor drain failed: %s", self.name, e)
+
+        # Clear the in-flight batch (status='processing') so the stopped work is
+        # NOT resurrected by recover_processing() on the next restart. (A crash
+        # intentionally requeues such rows; an explicit stop must not.)
+        cleared = self.queue.mark_processing_done()
+        if cleared:
+            log.info("[%s] Cleared %d in-flight task(s) on stop", self.name, cleared)
 
         # Reset flags and state. Drop the cached AIAgent so the NEXT turn re-inits
         # with a clean interrupt state (the interrupt flag we just set would
@@ -1041,6 +1162,11 @@ class AgentDaemon:
             due_in = self._next_cron_due_in()
             if due_in is not None:
                 timeout = max(1.0, min(timeout, due_in))
+            # When holding after an infra failure, re-check right when the hold
+            # expires (don't sleep a full sweep interval past recovery).
+            hold_in = self._infra_hold_until - time.time()
+            if hold_in > 0:
+                timeout = max(1.0, min(timeout, hold_in))
             self.next_sweep_at = time.time() + timeout
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=timeout)
@@ -1059,6 +1185,10 @@ class AgentDaemon:
         # Frozen by an emergency pause — process nothing and leave the queue
         # intact (work resumes untouched on resume). Return BEFORE draining.
         if self._paused:
+            return
+        # Holding off after an infra-failure (provider outage) — don't re-claim
+        # the batch until the backoff expires, so we don't hammer a down provider.
+        if time.time() < self._infra_hold_until:
             return
         # Claim a bounded batch first. If there's nothing to do, stay idle
         # SILENTLY — no state flip, no broadcast, no event. This is what keeps
@@ -1092,9 +1222,13 @@ class AgentDaemon:
                 self.next_sweep_at = time.time() + self._sweep_interval
             self._emit_state_change()
             # More queued while we were busy? Wake immediately rather than wait
-            # (but never while paused — held work waits for resume).
+            # (but never while paused — held work waits for resume — and never
+            # during an infra hold, which would re-spin against a down provider).
             try:
-                if not self._paused and self.queue.get_pending_count() > 0 and self._wake is not None:
+                if (not self._paused
+                        and time.time() >= self._infra_hold_until
+                        and self.queue.get_pending_count() > 0
+                        and self._wake is not None):
                     self._wake.set()
             except Exception:
                 pass
@@ -1213,7 +1347,14 @@ class AgentDaemon:
             content = (m.get("content") or "").strip()
             if not content:
                 continue
-            tools = re.findall(r"🛠️\s*([a-z_]+)\(", content)
+            # Two producer formats must both parse, or a real working turn is
+            # mis-scored as zero-action: the LIVE per-step render "🛠️ name(args)"
+            # and the end-of-turn fallback "🛠️ Tool Calls: name() | name2()".
+            tools = re.findall(r"🛠️\s*([a-z_][a-z0-9_]*)\(", content)
+            if not tools:
+                m = re.search(r"🛠️\s*Tool Calls:\s*([^\n]*)", content)
+                if m:
+                    tools = re.findall(r"([a-z_][a-z0-9_]*)\(", m.group(1))
             if not tools:
                 prose += 1  # free-text only — reaches nobody
             for t in tools:
@@ -1604,6 +1745,13 @@ class AgentDaemon:
         agent's own thread, so it cannot starve other agents.
         """
         token = _set_hermes_home_override(self._hermes_home)
+        # Pin this team's project dir on THIS worker thread for the whole turn, so
+        # every terminal/file tool call resolves TERMINAL_CWD to our repo even while
+        # a peer agent's turn runs concurrently on its own thread.
+        _set_terminal_cwd_override(
+            getattr(self, "_project_dir", None)
+            or _ensure_project_dir(self.cfg.get("team_id", "default"))
+        )
         try:
             self._ensure_agent()
             # Heal a crashed team browser before the turn. Relaunch reuses the
@@ -1652,6 +1800,7 @@ class AgentDaemon:
             )
         finally:
             _reset_hermes_home_override(token)
+            _reset_terminal_cwd_override()
 
     async def _process_tasks_batch(self, tasks: List[Dict[str, Any]]):
         task_ids = [t["id"] for t in tasks]
@@ -1671,7 +1820,7 @@ class AgentDaemon:
             "timestamp": time.time(),
         })
 
-        combined = f"You have {len(tasks)} new message(s) to process:\n\n"
+        combined = f"You have {len(tasks)} {_TASK_PROMPT_MARKER}:\n\n"
         for i, task in enumerate(tasks, 1):
             combined += f"--- [{i}] from {task['from_agent']} ---\n{task['payload']}\n\n"
 
@@ -1720,6 +1869,12 @@ class AgentDaemon:
             # next sweep (and a restart) resumes from the compacted session.
             self._persist_session_id_if_rotated()
 
+            # The turn produced a response (provider is reachable) — clear any
+            # infra-outage backoff so subsequent work runs at the normal cadence.
+            if not response.get("failed"):
+                self._infra_misses = 0
+                self._infra_hold_until = 0.0
+
             # A hard LLM failure (proxy down, billing exhausted, repeated stream
             # drops) does NOT raise — Hermes returns failed=True with an empty or
             # partial turn. The old code fell straight through the success path:
@@ -1763,8 +1918,16 @@ class AgentDaemon:
                 })
                 if infra:
                     # Not the task's fault — wait for recovery without burning the
-                    # retry budget. Retries on the natural sweep tick (no wake), so
-                    # the work resumes the moment the provider is back.
+                    # retry budget. Set an exponential hold so the sweep's
+                    # "more pending? wake now" path doesn't re-attempt instantly
+                    # and spin against a down provider; the loop re-checks when the
+                    # hold expires, so work still resumes promptly once it's back.
+                    self._infra_misses += 1
+                    backoff = min(
+                        INFRA_RETRY_BACKOFF_BASE_SECONDS * (2 ** (self._infra_misses - 1)),
+                        INFRA_RETRY_BACKOFF_MAX_SECONDS,
+                    )
+                    self._infra_hold_until = time.time() + backoff
                     self.queue.requeue_no_penalty(task_ids)
                     log.warning("[%s] Held %d task(s) for provider recovery (no penalty)",
                                 self.name, len(task_ids))
@@ -1811,9 +1974,17 @@ class AgentDaemon:
             final = str(response.get("final_response", ""))
             log.info("[%s] Batch complete. Response: %s", self.name, final[:200])
 
+            # This turn's output is everything after OUR task-prompt user message.
+            # Anchor on the task-prompt marker, NOT merely the last user-role
+            # message: Hermes injects mid-turn user-role messages (length
+            # continuations, tool-use enforcement nudges), and slicing after the
+            # last of those would drop this turn's earlier assistant tool calls
+            # from the transcript, the self-loop tool signatures, and the
+            # text-only ("did it act?") guard. The marker matches the preamble
+            # built in `combined` below.
             last_user_idx = -1
             for i, msg in enumerate(new_messages):
-                if msg.get("role") == "user":
+                if msg.get("role") == "user" and _TASK_PROMPT_MARKER in (msg.get("content") or ""):
                     last_user_idx = i
             turn_messages = new_messages[last_user_idx + 1 :] if last_user_idx >= 0 else new_messages
 

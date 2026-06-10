@@ -132,7 +132,10 @@ def _parse_summary(raw: str) -> Optional[dict]:
         did = [did]
     elif not isinstance(did, list):
         did = []
-    risk = str(obj.get("risk_level") or "ok").lower().strip()
+    # Fail SAFE: a missing/null/unknown risk_level (the likely truncation shape
+    # under max_tokens) must NOT read as healthy. Only an explicit, valid "ok"
+    # from the model yields "ok"; anything else escalates to "watch".
+    risk = str(obj.get("risk_level") or "watch").lower().strip()
     if risk not in RISK_LEVELS:
         risk = "watch"
     return {

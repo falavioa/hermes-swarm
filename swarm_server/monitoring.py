@@ -288,8 +288,12 @@ class MonitoringDB:
                     sql += " AND agent_name = ?"
                     params.append(agent_name)
                 if team_id:
-                    sql += " AND team_id = ?"
-                    params.append(team_id)
+                    # events rows have team_id NULL (writers don't set it); recover
+                    # the team's rows via the agent-name set too. See _team_filter.
+                    tclause, tparams = self._team_filter(conn, team_id)
+                    if tclause:
+                        sql += " AND " + tclause
+                        params.extend(tparams)
                 sql += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
                 params.extend([limit, offset])
                 rows = conn.execute(sql, tuple(params)).fetchall()
@@ -426,38 +430,45 @@ class MonitoringDB:
             return None
 
     def prune(self, max_events: int, max_messages: int,
-              max_digests: int = 5000) -> Dict[str, int]:
-        """Trim events/messages to the most recent N rows each (rolling retention).
+              max_digests: int = 5000, max_delegations: int = 20000,
+              max_actions: int = 20000, max_decisions: int = 20000,
+              max_milestones: int = 5000) -> Dict[str, int]:
+        """Trim each table to its most recent N rows (rolling retention).
 
-        Without this the DB grows unbounded on a 24/7 run (state-change and
-        message volume dominate). Returns rows deleted per table.
+        Without this the DB grows unbounded on a 24/7 run. Every table that
+        runtime code appends to is bounded here — not just events/messages/digests
+        but the relational tables (delegations/actions/decisions/milestones), which
+        previously had NO retention at all. Still-OPEN delegations are NEVER pruned
+        (they represent outstanding work the supervisor still tracks). Returns rows
+        deleted per table.
         """
-        deleted = {"events": 0, "messages": 0, "digests": 0}
+        deleted = {"events": 0, "messages": 0, "digests": 0,
+                   "delegations": 0, "actions": 0, "decisions": 0, "milestones": 0}
+        # (table, keep-N, extra WHERE that protects rows from pruning)
+        plans = [
+            ("events", max_events, ""),
+            ("messages", max_messages, ""),
+            ("digests", max_digests, ""),
+            # Keep open delegations regardless of age/count.
+            ("delegations", max_delegations, "status != 'open'"),
+            ("actions", max_actions, ""),
+            ("decisions", max_decisions, ""),
+            ("milestones", max_milestones, ""),
+        ]
         try:
             with self._conn() as conn:
-                cur = conn.execute(
-                    "DELETE FROM events WHERE id NOT IN "
-                    "(SELECT id FROM events ORDER BY id DESC LIMIT ?)",
-                    (max_events,),
-                )
-                deleted["events"] = cur.rowcount or 0
-                cur = conn.execute(
-                    "DELETE FROM messages WHERE id NOT IN "
-                    "(SELECT id FROM messages ORDER BY id DESC LIMIT ?)",
-                    (max_messages,),
-                )
-                deleted["messages"] = cur.rowcount or 0
-                cur = conn.execute(
-                    "DELETE FROM digests WHERE id NOT IN "
-                    "(SELECT id FROM digests ORDER BY id DESC LIMIT ?)",
-                    (max_digests,),
-                )
-                deleted["digests"] = cur.rowcount or 0
+                for table, keep, guard in plans:
+                    keep_clause = (
+                        f"id NOT IN (SELECT id FROM {table} ORDER BY id DESC LIMIT ?)"
+                    )
+                    where = keep_clause + (f" AND ({guard})" if guard else "")
+                    cur = conn.execute(f"DELETE FROM {table} WHERE {where}", (keep,))
+                    deleted[table] = cur.rowcount or 0
                 conn.commit()
-            if deleted["events"] or deleted["messages"] or deleted["digests"]:
+            if any(deleted.values()):
                 log.info(
-                    "[MonitorDB] Pruned %d events, %d messages, %d digests",
-                    deleted["events"], deleted["messages"], deleted["digests"],
+                    "[MonitorDB] Pruned %s",
+                    ", ".join(f"{n} {t}" for t, n in deleted.items() if n),
                 )
         except Exception as e:
             log.warning("[MonitorDB] Prune failed: %s", e)
@@ -468,6 +479,15 @@ class MonitoringDB:
                         kind: str, summary: str = "", team_id: str = None) -> None:
         try:
             with self._conn() as conn:
+                # Idempotent on msg_id: a deduped re-send (same deterministic msg_id)
+                # must not open a SECOND delegation that no RESULT will ever close
+                # (a phantom "overdue" the supervisor chases forever).
+                existing = conn.execute(
+                    "SELECT 1 FROM delegations WHERE msg_id=? AND status='open' LIMIT 1",
+                    (msg_id,),
+                ).fetchone()
+                if existing:
+                    return
                 conn.execute(
                     "INSERT INTO delegations (msg_id, timestamp, from_agent, to_agent, "
                     "team_id, kind, summary, status) VALUES (?,?,?,?,?,?,?, 'open')",
@@ -606,13 +626,27 @@ class MonitoringDB:
                 ).fetchone()
                 if prior:
                     return {"duplicate": True, "existing": dict(prior)}
-                conn.execute(
-                    "INSERT INTO actions (timestamp, agent_name, team_id, action_type, "
-                    "target, idempotency_key, outcome, verified) VALUES (?,?,?,?,?,?,?,?)",
-                    (time.time(), agent_name, team_id, action_type, (target or "")[:300],
-                     idempotency_key, (outcome or "")[:500], 1 if verified else 0),
-                )
-                conn.commit()
+                try:
+                    conn.execute(
+                        "INSERT INTO actions (timestamp, agent_name, team_id, action_type, "
+                        "target, idempotency_key, outcome, verified) VALUES (?,?,?,?,?,?,?,?)",
+                        (time.time(), agent_name, team_id, action_type, (target or "")[:300],
+                         idempotency_key, (outcome or "")[:500], 1 if verified else 0),
+                    )
+                    conn.commit()
+                except sqlite3.IntegrityError:
+                    # Lost a concurrent race on the UNIQUE (team_id, idempotency_key)
+                    # index — another agent inserted between our SELECT and INSERT.
+                    # This is the exact double-action the guard exists for: report it
+                    # as a DUPLICATE so the loser skips the side effect, instead of
+                    # the old `except Exception` path that returned duplicate=False
+                    # and told BOTH agents to proceed.
+                    conn.rollback()
+                    row = conn.execute(
+                        "SELECT * FROM actions WHERE team_id IS ? AND idempotency_key = ?",
+                        (team_id, idempotency_key),
+                    ).fetchone()
+                    return {"duplicate": True, "existing": dict(row) if row else {}}
                 return {"duplicate": False, "recorded": True}
         except Exception as e:
             log.warning("[MonitorDB] record_action failed: %s", e)
@@ -650,8 +684,12 @@ class MonitoringDB:
     def count_decisions_since(self, team_id: str, since_ts: float) -> int:
         try:
             with self._conn() as conn:
+                # Exclude the loop detector's OWN alert rows: it writes a decision
+                # note when it fires, and counting that as team productivity would
+                # suppress the very team-stall detection that reads this count.
                 row = conn.execute(
-                    "SELECT COUNT(*) FROM decisions WHERE team_id IS ? AND timestamp >= ?",
+                    "SELECT COUNT(*) FROM decisions WHERE team_id IS ? AND timestamp >= ? "
+                    "AND agent_name != 'loop_detector'",
                     (team_id, since_ts),
                 ).fetchone()
                 return row[0] if row else 0
@@ -700,20 +738,51 @@ class MonitoringDB:
             log.warning("[MonitorDB] get_latest_milestone failed: %s", e)
             return None
 
+    def _team_agent_names(self, conn, team_id: str) -> set:
+        """Agent names known to belong to ``team_id``, resolved from the tables
+        that reliably carry team_id (decisions/actions/delegations).
+
+        The events/messages tables are written with team_id NULL by the runtime,
+        so a plain ``team_id = ?`` filter on them matches nothing — callers OR this
+        set in to recover the team's rows.
+        """
+        names = set()
+        for sql in (
+            "SELECT DISTINCT agent_name FROM decisions WHERE team_id IS ?",
+            "SELECT DISTINCT agent_name FROM actions WHERE team_id IS ?",
+            "SELECT DISTINCT from_agent FROM delegations WHERE team_id IS ?",
+            "SELECT DISTINCT to_agent FROM delegations WHERE team_id IS ?",
+        ):
+            try:
+                for r in conn.execute(sql, (team_id,)).fetchall():
+                    if r[0]:
+                        names.add(r[0])
+            except Exception:
+                pass
+        return names
+
+    def _team_filter(self, conn, team_id, col: str = "agent_name"):
+        """Return (sql_fragment, params) selecting a team's rows even when the
+        row's own team_id is NULL (events/messages). Empty fragment if no team."""
+        if not team_id:
+            return "", []
+        names = sorted(self._team_agent_names(conn, team_id))
+        if names:
+            ph = ",".join("?" * len(names))
+            return f"(team_id = ? OR {col} IN ({ph}))", [team_id, *names]
+        return "team_id = ?", [team_id]
+
     def get_agent_stats(self, team_id: Optional[str] = None) -> Dict[str, dict]:
         stats = {}
         try:
             with self._conn() as conn:
                 conn.row_factory = sqlite3.Row
-                sql = (
-                    "SELECT agent_name, event_type, COUNT(*) as count FROM events"
-                )
-                params = []
-                if team_id:
-                    sql += " WHERE team_id = ?"
-                    params.append(team_id)
-                sql += " GROUP BY agent_name, event_type"
-                rows = conn.execute(sql, tuple(params)).fetchall()
+                tclause, tparams = self._team_filter(conn, team_id)
+                where = (" WHERE " + tclause) if tclause else ""
+
+                sql = ("SELECT agent_name, event_type, COUNT(*) as count FROM events"
+                       + where + " GROUP BY agent_name, event_type")
+                rows = conn.execute(sql, tuple(tparams)).fetchall()
                 for r in rows:
                     aname = r["agent_name"]
                     if aname not in stats:
@@ -725,27 +794,17 @@ class MonitoringDB:
                         }
                     stats[aname]["events"][r["event_type"]] = r["count"]
 
-                sql_last = "SELECT agent_name, MAX(timestamp) as last_ts FROM events"
-                params_last = []
-                if team_id:
-                    sql_last += " WHERE team_id = ?"
-                    params_last.append(team_id)
-                sql_last += " GROUP BY agent_name"
-                rows = conn.execute(sql_last, tuple(params_last)).fetchall()
+                sql_last = ("SELECT agent_name, MAX(timestamp) as last_ts FROM events"
+                            + where + " GROUP BY agent_name")
+                rows = conn.execute(sql_last, tuple(tparams)).fetchall()
                 for r in rows:
                     if r["agent_name"] in stats:
                         stats[r["agent_name"]]["last_active"] = r["last_ts"]
 
-                sql_msg = (
-                    "SELECT agent_name, COUNT(*) as count, "
-                    "COALESCE(SUM(tokens), 0) as tokens FROM messages"
-                )
-                params_msg = []
-                if team_id:
-                    sql_msg += " WHERE team_id = ?"
-                    params_msg.append(team_id)
-                sql_msg += " GROUP BY agent_name"
-                rows = conn.execute(sql_msg, tuple(params_msg)).fetchall()
+                sql_msg = ("SELECT agent_name, COUNT(*) as count, "
+                           "COALESCE(SUM(tokens), 0) as tokens FROM messages"
+                           + where + " GROUP BY agent_name")
+                rows = conn.execute(sql_msg, tuple(tparams)).fetchall()
                 for r in rows:
                     if r["agent_name"] in stats:
                         stats[r["agent_name"]]["total_messages"] = r["count"]
