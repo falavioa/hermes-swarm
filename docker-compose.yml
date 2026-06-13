@@ -9,7 +9,8 @@ services:
       SWARM_DATA_DIR: "/data"
     ports:
       # localhost-only by default. To expose on the LAN, change to "8000:8000"
-      # AND set SWARM_API_KEY in .env (the dashboard has no login otherwise).
+      # AND set SWARM_API_KEY in .env — it guards every endpoint + the
+      # WebSocket, and the dashboard prompts for the key on first load.
       - "127.0.0.1:8000:8000"
     volumes:
       - swarm-data:/data

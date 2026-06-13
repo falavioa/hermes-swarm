@@ -4,13 +4,9 @@ import logging
 
 import uvicorn
 
-from swarm_server.config import SERVER_HOST, SERVER_PORT
+from swarm_server.config import SERVER_HOST, SERVER_PORT, configure_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-    datefmt="%H:%M:%S",
-)
+configure_logging()
 
 log = logging.getLogger("swarm")
 

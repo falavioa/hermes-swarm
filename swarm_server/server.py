@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -168,6 +169,16 @@ async def lifespan(app: FastAPI):
     # (queue.recover_processing()), so a restart resumes work instead of losing it.
     cfg = load_agents_config()
     loop = asyncio.get_running_loop()
+
+    # Rebuild today's per-team spend meter from monitoring.db BEFORE daemons
+    # start sweeping, so a mid-day restart resumes with the correct budget state
+    # (a team already over its cap stays paused instead of getting a free reset).
+    try:
+        from swarm_server.budget import budget_tracker
+        budget_tracker.rebuild(monitor_db, cfg)
+    except Exception as e:
+        log.warning("[Startup] budget rebuild failed: %s", e)
+
     for agent_name, agent_cfg in cfg["agents"].items():
         register_agent_daemon(agent_name, agent_cfg, loop)
 
@@ -211,22 +222,67 @@ app.add_middleware(
 )
 
 
+# Paths reachable WITHOUT the API key even when auth is on: the dashboard shell
+# itself (so the login UI can render), the load-balancer health probe, and the
+# self-reporting auth probe the dashboard hits at boot. None of these has a
+# mutating handler, so exempting them by exact path (any method) is safe.
+AUTH_EXEMPT_PATHS = {"/", "/health", "/auth/check"}
+
+# Application-defined WebSocket close code for an unauthenticated socket
+# (4000-4999 is the private-use range). The dashboard re-opens the login modal
+# when it sees this.
+WS_CLOSE_UNAUTHORIZED = 4401
+WS_AUTH_TIMEOUT_SECONDS = 10.0
+
+
+def _request_key_ok(request: Request) -> bool:
+    """True iff the request carries the correct API key in either
+    'X-API-Key: <key>' or 'Authorization: Bearer <key>'. Constant-time compare."""
+    provided = request.headers.get("x-api-key", "")
+    auth = request.headers.get("authorization", "")
+    if not provided and auth.lower().startswith("bearer "):
+        provided = auth[7:].strip()
+    return bool(provided) and secrets.compare_digest(provided, SWARM_API_KEY)
+
+
 @app.middleware("http")
 async def _auth_guard(request: Request, call_next):
-    """Optional bearer/API-key auth on mutating endpoints.
+    """Optional single-key auth on ALL endpoints.
 
-    Disabled unless SWARM_API_KEY is set (the server binds localhost). When set,
-    POST/PUT/PATCH/DELETE require either 'Authorization: Bearer <key>' or
-    'X-API-Key: <key>'. Read-only GETs and the dashboard stay open.
+    Disabled unless SWARM_API_KEY is set (the server then assumes a trusted
+    localhost bind). When set, every request — reads included, since agent
+    conversations and masked credentials are sensitive — needs the key, except
+    the small AUTH_EXEMPT_PATHS allow-list. WebSockets are guarded separately by
+    _ws_authenticate (HTTP middleware never sees WS scopes).
     """
-    if SWARM_API_KEY and request.method in ("POST", "PUT", "PATCH", "DELETE"):
-        provided = request.headers.get("x-api-key", "")
-        auth = request.headers.get("authorization", "")
-        if not provided and auth.lower().startswith("bearer "):
-            provided = auth[7:].strip()
-        if provided != SWARM_API_KEY:
+    if SWARM_API_KEY and request.url.path not in AUTH_EXEMPT_PATHS:
+        if not _request_key_ok(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await call_next(request)
+
+
+async def _ws_authenticate(ws: WebSocket) -> bool:
+    """Accept the socket, then (if auth is on) require a first message
+    ``{"action":"auth","api_key":"..."}`` within the timeout before any data is
+    sent. Returns True iff the connection may proceed. Reused by every WS
+    endpoint, including the browser-control stream. Sends nothing pre-auth."""
+    await ws.accept()
+    if not SWARM_API_KEY:
+        return True
+    try:
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=WS_AUTH_TIMEOUT_SECONDS)
+        msg = json.loads(raw)
+        key = str(msg.get("api_key", ""))
+        if msg.get("action") == "auth" and key and secrets.compare_digest(key, SWARM_API_KEY):
+            await ws.send_text(json.dumps({"type": "auth_ok", "payload": {}}))
+            return True
+    except Exception:
+        pass
+    try:
+        await ws.close(code=WS_CLOSE_UNAUTHORIZED)
+    except Exception:
+        pass
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +292,9 @@ async def _auth_guard(request: Request, call_next):
 async def websocket_endpoint(ws: WebSocket):
     import time
 
-    await ws_broadcaster.connect(ws)
+    if not await _ws_authenticate(ws):
+        return
+    await ws_broadcaster.register(ws)
     try:
         state_snapshot = {
             "type": "state_snapshot",
@@ -269,6 +327,36 @@ async def websocket_endpoint(ws: WebSocket):
     except Exception as e:
         log.warning("[WS] Error: %s", e)
         await ws_broadcaster.disconnect(ws)
+
+
+@app.websocket("/teams/{team_id}/browser/ws")
+async def browser_stream_endpoint(ws: WebSocket, team_id: str):
+    """Live view + control of a team's headless browser (embedded handover).
+
+    This socket grants FULL control of the team browser session, so it is
+    authenticated exactly like /ws (same first-message scheme). It does not join
+    the broadcast pool — it's a private 1:1 relay to that team's Chrome.
+    """
+    if not await _ws_authenticate(ws):
+        return
+    cfg = load_agents_config()
+    if team_id not in cfg.get("teams", {}):
+        await ws.send_text(json.dumps({"type": "error",
+            "payload": {"message": f"Unknown team '{team_id}'."}}))
+        await ws.close()
+        return
+    from swarm_server import browser_stream
+    try:
+        await browser_stream.relay(ws, team_id)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("[browser-stream] %s: %s", team_id, e)
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -659,9 +747,60 @@ async def get_team_costs(team_id: str, hours: float = 24):
             sweeps["skipped"] += monitor_db.count_events_since(
                 name, "supervisor_sweep_skipped", since_ts)
 
+    from swarm_server.budget import budget_tracker
     return JSONResponse({"team_id": team_id, "hours": hours,
                          "agents": per_agent, "totals": totals,
-                         "sweeps": sweeps})
+                         "sweeps": sweeps,
+                         "budget": budget_tracker.status(team_id)})
+
+
+# ---------------------------------------------------------------------------
+# Team budget — daily spend cap with auto-pause (see swarm_server/budget.py)
+# ---------------------------------------------------------------------------
+@app.get("/teams/{team_id}/budget")
+async def get_team_budget_status(team_id: str):
+    from swarm_server.budget import budget_tracker
+    return JSONResponse(budget_tracker.status(team_id))
+
+
+@app.put("/teams/{team_id}/budget")
+async def put_team_budget(team_id: str, request: Request):
+    from swarm_server.config import set_team_budget
+    from swarm_server.budget import budget_tracker
+
+    body = await request.json()
+    try:
+        daily_usd = float(body.get("daily_usd", 0) or 0)
+        daily_tokens = int(body.get("daily_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "daily_usd / daily_tokens must be numbers"},
+                            status_code=400)
+    try:
+        set_team_budget(team_id, daily_usd, daily_tokens)
+    except ValueError as exc:
+        msg = str(exc)
+        code = 404 if "unknown team" in msg else 400
+        return JSONResponse({"error": msg}, status_code=code)
+    budget_tracker.set_limits(team_id, daily_usd, daily_tokens)
+    return JSONResponse(budget_tracker.status(team_id))
+
+
+@app.post("/teams/{team_id}/budget/override")
+async def post_team_budget_override(team_id: str):
+    """Resume a budget-paused team for the rest of the UTC day."""
+    from swarm_server.budget import budget_tracker
+    budget_tracker.override_today(team_id)
+    # Wake the team's daemons so held work resumes immediately, not next tick.
+    cfg = load_agents_config()
+    for name, a in (cfg.get("agents") or {}).items():
+        if a.get("team_id") == team_id:
+            d = daemons.get(name)
+            if d is not None:
+                try:
+                    d._signal_wake()
+                except Exception:
+                    pass
+    return JSONResponse(budget_tracker.status(team_id))
 
 
 # ---------------------------------------------------------------------------
@@ -1489,14 +1628,66 @@ async def resume_agent_execution(agent_name: str):
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
+_PROCESS_START_TS = None  # set on first /health call (import time is fine too)
+_BACKEND_CHECK = {"ts": 0.0, "ok": None}
+
+
+def _backend_reachable_cached() -> Optional[bool]:
+    """Is the LLM backend reachable? Cached 60s so /health polling can't hammer
+    the proxy. None until first probed / on error."""
+    import time as _t
+    import urllib.request
+    if _t.time() - _BACKEND_CHECK["ts"] < 60:
+        return _BACKEND_CHECK["ok"]
+    _BACKEND_CHECK["ts"] = _t.time()
+    try:
+        from swarm_server.config import LITELLM_API_BASE, LLM_API_KEY
+        req = urllib.request.Request(f"{LITELLM_API_BASE}/models",
+                                     headers={"Authorization": f"Bearer {LLM_API_KEY}"})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            _BACKEND_CHECK["ok"] = (r.status == 200)
+    except Exception:
+        _BACKEND_CHECK["ok"] = False
+    return _BACKEND_CHECK["ok"]
+
+
 @app.get("/health")
-async def health():
+async def health(request: Request):
+    import time as _t
+    global _PROCESS_START_TS
+    if _PROCESS_START_TS is None:
+        _PROCESS_START_TS = _t.time()
+    # When auth is on, an UNauthenticated probe gets only liveness — the agent /
+    # team names are sensitive. An authenticated probe (or no-auth localhost)
+    # gets the full operational picture.
+    if SWARM_API_KEY and not _request_key_ok(request):
+        return {"status": "ok"}
     cfg = load_agents_config()
+    queue_depth = 0
+    for d in daemons.values():
+        try:
+            queue_depth += d.queue.get_pending_count()
+        except Exception:
+            pass
     return {
         "status": "ok",
+        "version": app.version,
+        "uptime_s": round(_t.time() - _PROCESS_START_TS, 1),
         "agents": list(daemons.keys()),
         "teams": list(cfg["teams"].keys()),
+        "queue_depth": queue_depth,
+        "llm_backend_ok": _backend_reachable_cached(),
     }
+
+
+@app.get("/auth/check")
+async def auth_check(request: Request):
+    """Self-reporting auth probe the dashboard hits at boot. Always 200 so a
+    reverse proxy's own 401s can't be mistaken for 'wrong key'. Leaks nothing
+    beyond whether auth is enabled."""
+    if not SWARM_API_KEY:
+        return {"auth_required": False, "authorized": True}
+    return {"auth_required": True, "authorized": _request_key_ok(request)}
 
 
 # ---------------------------------------------------------------------------

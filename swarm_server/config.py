@@ -13,6 +13,32 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger("swarm.config")
 
 
+def configure_logging(level: int = logging.INFO) -> None:
+    """Set up root logging once for an entry point. Always logs to stdout
+    (captured by Docker / journald); if SWARM_LOG_FILE is set, ALSO writes to a
+    rotating file (10 MB × 5) so a bare-metal 24/7 run keeps an on-disk trail."""
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+                            datefmt="%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(level)
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+    log_file = os.environ.get("SWARM_LOG_FILE", "").strip()
+    if log_file and not any(getattr(h, "_swarm_file", False) for h in root.handlers):
+        try:
+            from logging.handlers import RotatingFileHandler
+            Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+            fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5)
+            fh.setFormatter(fmt)
+            fh._swarm_file = True
+            root.addHandler(fh)
+            log.info("Logging to %s (rotating 10MB × 5)", log_file)
+        except Exception as e:
+            log.warning("Could not open SWARM_LOG_FILE %s: %s", log_file, e)
+
+
 def ensure_hermes_importable() -> None:
     """Make the Hermes agent package importable, however it was obtained.
 
@@ -420,6 +446,15 @@ SELF_LOOP_COOLDOWN_SECONDS = int(os.environ.get("SWARM_SELF_LOOP_COOLDOWN", "180
 # `npx playwright install chromium`). Set to "" to leave provider auto-detect
 # alone (cloud mode, needs creds in the server env).
 BROWSER_CLOUD_PROVIDER = "local"
+
+# How a human browser takeover is presented:
+#   "embedded" (default) — the team browser stays HEADLESS; the human drives it
+#       through a live view streamed into the dashboard (works on a display-less
+#       VPS). See swarm_server/browser_stream.py.
+#   "window" — legacy behaviour: relaunch the team browser as a real visible
+#       Chrome window on the HOST's desktop (only works where the server has a
+#       display, e.g. a developer's own machine).
+SWARM_TAKEOVER_MODE = os.environ.get("SWARM_TAKEOVER_MODE", "embedded").strip().lower()
 
 # ---------------------------------------------------------------------------
 # Monitoring retention — rolling cap so monitoring.db stays bounded over 24/7 runs
@@ -1321,6 +1356,40 @@ def get_agent_team(cfg: Dict[str, Any], name: str) -> Optional[str]:
 
 def get_team_agents(cfg: Dict[str, Any], team_id: str) -> Dict[str, Any]:
     return {name: a for name, a in cfg["agents"].items() if a.get("team_id") == team_id}
+
+
+def get_team_budget(cfg: Dict[str, Any], team_id: str) -> Dict[str, float]:
+    """The team's daily spend caps, sanitized. 0 = unlimited for that axis.
+    ``daily_usd`` is the primary cap; ``daily_tokens`` is the fallback for
+    models with no known price (estimate_cost_usd returns None for those)."""
+    raw = ((cfg.get("teams") or {}).get(team_id) or {}).get("budget") or {}
+    try:
+        usd = max(0.0, float(raw.get("daily_usd", 0) or 0))
+    except (TypeError, ValueError):
+        usd = 0.0
+    try:
+        toks = max(0, int(raw.get("daily_tokens", 0) or 0))
+    except (TypeError, ValueError):
+        toks = 0
+    return {"daily_usd": usd, "daily_tokens": toks}
+
+
+def set_team_budget(team_id: str, daily_usd: float, daily_tokens: int) -> Dict[str, float]:
+    """Persist the team's daily caps (locked read-modify-write). Raises
+    ValueError for an unknown team or negative values."""
+    daily_usd = float(daily_usd or 0)
+    daily_tokens = int(daily_tokens or 0)
+    if daily_usd < 0 or daily_tokens < 0:
+        raise ValueError("budget values must be non-negative")
+    with _config_lock:
+        cfg = load_agents_config()
+        if team_id not in (cfg.get("teams") or {}):
+            raise ValueError(f"unknown team '{team_id}'")
+        cfg["teams"][team_id]["budget"] = {
+            "daily_usd": daily_usd, "daily_tokens": daily_tokens,
+        }
+        _save_full_config(cfg)
+    return {"daily_usd": daily_usd, "daily_tokens": daily_tokens}
 
 
 def peer_allowed(cfg: Dict[str, Any], caller: str, target: str) -> bool:

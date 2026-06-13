@@ -1270,8 +1270,10 @@ class AgentDaemon:
             self._wake.clear()
             await self._sweep()
             # A paused agent does NOTHING off-cycle either — no crons, no
-            # autonomous heartbeat, no supervisor reviews — until resumed.
-            if not self._paused:
+            # autonomous heartbeat, no supervisor reviews — until resumed. A team
+            # over its daily budget is held the same way (no new self-inflicted
+            # work piling up) until the cap is raised / overridden / rolls over.
+            if not self._paused and not self._budget_blocked():
                 self._maybe_fire_crons()
                 self._maybe_autonomous_heartbeat()
                 self._maybe_feed_supervisor()
@@ -1284,6 +1286,11 @@ class AgentDaemon:
         # Holding off after an infra-failure (provider outage) — don't re-claim
         # the batch until the backoff expires, so we don't hammer a down provider.
         if time.time() < self._infra_hold_until:
+            return
+        # Team over its daily budget — HOLD the queue (tasks kept, not failed),
+        # same shape as the infra hold. Resumes automatically at UTC rollover, or
+        # immediately when the human raises the cap / clicks "resume anyway".
+        if self._budget_blocked():
             return
         # Claim a bounded batch first. If there's nothing to do, stay idle
         # SILENTLY — no state flip, no broadcast, no event. This is what keeps
@@ -1327,6 +1334,15 @@ class AgentDaemon:
                     self._wake.set()
             except Exception:
                 pass
+
+    def _budget_blocked(self) -> bool:
+        """True when this agent's team is over its daily spend cap. Cheap
+        (in-memory dict lookups) — safe to call every sweep tick."""
+        try:
+            from swarm_server.budget import budget_tracker
+            return budget_tracker.is_blocked(self.cfg.get("team_id", "default"))
+        except Exception:
+            return False
 
     def _maybe_autonomous_heartbeat(self) -> None:
         """Self-inject a continue-mission task when idle (24/7 autonomy).
@@ -2275,6 +2291,11 @@ class AgentDaemon:
                         "estimated_cost_usd": response.get("estimated_cost_usd", 0),
                     },
                 )
+                # Meter the team's daily spend (auto-pauses the team if over cap).
+                from swarm_server.budget import budget_tracker
+                budget_tracker.record_turn(
+                    self.cfg.get("team_id", "default"), self._current_model,
+                    turn_in, turn_out, turn_cache)
             except Exception as e:
                 log.debug("[%s] token usage logging failed: %s", self.name, e)
 

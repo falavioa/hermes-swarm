@@ -76,7 +76,7 @@ confirm what it found.
 | `SWARM_DEFAULT_MODEL` | `litellm-model` | default model for new agents |
 | `SWARM_FALLBACK_MODELS` | `litellm-model,kimi` | dropdown list if the backend can't be queried |
 | `SWARM_HOST` / `SWARM_PORT` | `127.0.0.1` / `8000` | dashboard bind address |
-| `SWARM_API_KEY` | *(unset)* | if set, required on mutating endpoints — **set it if you expose the port** |
+| `SWARM_API_KEY` | *(unset)* | if set, required on **every** endpoint + WebSocket — the dashboard prompts for it once and remembers it. **Set it whenever you expose the port.** |
 | `SWARM_DATA_DIR` | repo `./data` or `~/.hermes-swarm/data` | writable state (configs, queues, workspaces) |
 | `HERMES_AGENT_PATH` | *(unset)* | path to a Hermes source checkout (only if not pip-installed) |
 
@@ -95,8 +95,12 @@ cancel their own via the `schedule_wakeup` / `cancel_wakeup` tools.
 
 ## Notes
 
-- **Security:** the dashboard has no login. Keep it on `127.0.0.1`, or set
-  `SWARM_API_KEY` and put it behind a reverse proxy before exposing it.
+- **Security:** by default the server binds `127.0.0.1` with no key. To expose
+  it (VPS/LAN), set `SWARM_API_KEY` — it then guards every HTTP endpoint *and*
+  the WebSocket, and the dashboard prompts for the key once (stored in your
+  browser). Put it behind a TLS reverse proxy too. Agents can run terminal
+  commands as the server user, so on a shared/exposed host prefer the Docker
+  route. See [`docs/deploy-vps.md`](docs/deploy-vps.md) for a hardened setup.
 - **Chromium** is required only for the browser-publishing tools; everything
   else works without it (the swarm degrades gracefully).
 - **Data & backups:** state lives in `SWARM_DATA_DIR`; every config save keeps a

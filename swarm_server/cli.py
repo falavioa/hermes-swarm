@@ -15,11 +15,8 @@ import sys
 
 
 def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    from swarm_server.config import configure_logging
+    configure_logging()
 
 
 def cmd_up(args) -> int:

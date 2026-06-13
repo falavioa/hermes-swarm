@@ -946,29 +946,45 @@ def _request_human_takeover_handler(args: dict, **kwargs) -> str:
         return json.dumps({"error": f"Caller agent '{caller}' not registered."})
     team_id = (daemon.cfg or {}).get("team_id", "default")
 
-    # Bring the team browser onto the human's screen as a real, visible Chrome
-    # window (same persistent profile), opened on the page the agent was blocked on.
-    shown = False
-    try:
-        from swarm_server.browser_pool import team_browser_manager
-        shown = team_browser_manager.begin_takeover(team_id)
-    except Exception as e:
-        log.error("[%s] [takeover] begin_takeover failed: %s", caller, e)
+    from swarm_server.config import SWARM_TAKEOVER_MODE
+    embedded = SWARM_TAKEOVER_MODE != "window"
 
-    if shown:
+    shown = False
+    if embedded:
+        # Keep the team browser HEADLESS; the human drives it through the live
+        # view embedded in the dashboard. Just make sure a browser exists so the
+        # stream has something to attach to.
+        try:
+            from swarm_server.browser_pool import team_browser_manager
+            shown = bool(team_browser_manager.ensure_team_browser(team_id))
+        except Exception as e:
+            log.error("[%s] [takeover] ensure_team_browser failed: %s", caller, e)
+        access = (
+            "\n\n👉 Open the **Browser** panel in the dashboard (the takeover item "
+            "in your inbox has an 'Open browser' button) to see and control the "
+            "page that needs you, then complete the step there."
+            if shown else
+            "\n\n⚠️ No browser is available on this host (install Chrome, or run "
+            "`npx playwright install chromium`)."
+        )
+    else:
+        # Legacy: bring the team browser onto the host's screen as a real,
+        # visible Chrome window, opened on the page the agent was blocked on.
+        try:
+            from swarm_server.browser_pool import team_browser_manager
+            shown = team_browser_manager.begin_takeover(team_id)
+        except Exception as e:
+            log.error("[%s] [takeover] begin_takeover failed: %s", caller, e)
         access = (
             "\n\n👉 A Chrome window has just opened on your screen, on the page "
             "that needs you. Complete the step there."
-        )
-    else:
-        access = (
+            if shown else
             "\n\n⚠️ Couldn't open the browser window automatically (no display on "
             "this host?). The browser session is the team's persistent profile."
         )
     prompt = (
         "🙋 BROWSER TAKEOVER requested by '" + caller + "':\n" + reason + access +
-        "\n\nDo the step above in that window, then reply 'done' here to hand "
-        "control back to the agent."
+        "\n\nWhen you're done, reply 'done' here to hand control back to the agent."
     )
     log.info("[%s] [takeover] %s | window_shown=%s", daemon.name, reason, shown)
 

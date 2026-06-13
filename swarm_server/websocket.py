@@ -29,11 +29,19 @@ class WSBroadcaster:
         self.clients: Set[WebSocket] = set()
         self._lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
+    async def register(self, ws: WebSocket):
+        """Register an already-accepted (and authenticated) socket for
+        broadcasts. Accepting the handshake is done by the caller — see
+        ``_ws_authenticate`` in server.py — so an unauthenticated client is
+        never added here and never receives any broadcast payload."""
         async with self._lock:
             self.clients.add(ws)
         log.info("[WS] Client connected. Total: %d", len(self.clients))
+
+    async def connect(self, ws: WebSocket):
+        """Backwards-compatible accept + register in one call."""
+        await ws.accept()
+        await self.register(ws)
 
     async def disconnect(self, ws: WebSocket):
         async with self._lock:

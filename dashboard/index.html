@@ -291,6 +291,22 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .inbox-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 140; display: none; }
 .inbox-overlay.open { display: block; animation: fadeIn 0.2s ease; }
 
+/* ===== EMBEDDED BROWSER PANEL (human takeover) ===== */
+.browser-panel { position: fixed; top: 0; right: -1000px; width: 960px; max-width: 98vw; bottom: 0; background: var(--bg-raised); border-left: 1px solid var(--border-strong); z-index: 160; transition: right 0.32s cubic-bezier(.2,.8,.2,1); display: flex; flex-direction: column; box-shadow: -30px 0 80px -40px rgba(0,0,0,0.9); }
+.browser-panel.open { right: 0; }
+.browser-toolbar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.browser-toolbar .control-input { flex: 1; min-width: 0; height: 32px; }
+.browser-toolbar select { max-width: 200px; height: 32px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 11px; }
+.browser-stage { flex: 1; overflow: auto; background: #14181f; display: flex; align-items: flex-start; justify-content: center; }
+#browser-canvas { display: block; max-width: 100%; cursor: crosshair; background: #fff; }
+.browser-status { padding: 6px 12px; font-size: 11px; color: var(--text-muted); border-top: 1px solid var(--border); font-family: var(--font-mono); display: flex; justify-content: space-between; align-items: center; }
+.browser-status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--text-muted); }
+.browser-status.live .dot { background: var(--accent, #3ecf8e); }
+
+/* ===== BUDGET BANNER ===== */
+#budget-banner { position: fixed; top: 52px; left: 0; right: 0; z-index: 130; padding: 8px 16px; background: rgba(242,85,90,0.14); border-bottom: 1px solid rgba(242,85,90,0.5); color: var(--text); font-size: 12.5px; display: flex; align-items: center; justify-content: center; gap: 14px; }
+#budget-banner .bb-actions { display: flex; gap: 8px; }
+
 /* ===== ARCHITECT (master) PANEL ===== */
 .master-panel { position: fixed; top: 0; right: -560px; width: 540px; max-width: 96vw; bottom: 0; background: var(--bg-raised); border-left: 1px solid var(--border-strong); z-index: 150; transition: right 0.32s cubic-bezier(.2,.8,.2,1); display: flex; flex-direction: column; box-shadow: -30px 0 80px -40px rgba(0,0,0,0.9); }
 .master-panel.open { right: 0; }
@@ -453,6 +469,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
             ">0</span>
         </button>
         <button class="btn btn-sm btn-secondary" onclick="showModelSettings(false)" title="Default model for all agents"><span data-icon="cpu" data-icon-size="13"></span> Model</button>
+        <button class="btn btn-sm btn-secondary" onclick="openBrowserPanel(currentTeam)" title="Watch & control this team's browser live"><span data-icon="globe" data-icon-size="13"></span> Browser</button>
         <label for="team-select" class="sr-only">Team</label>
         <select id="team-select" onchange="changeTeam(this.value)"><option value="">Loading teams...</option></select>
         <button class="btn btn-sm btn-secondary" onclick="showAddTeam()">+ New Team</button>
@@ -460,6 +477,9 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
         <div class="ws-status disconnected" id="ws-status" role="status"><span class="ws-dot"></span><span id="ws-text">Disconnected</span></div>
     </div>
 </div>
+
+<!-- Budget-paused banner (shown when the current team is over its daily cap) -->
+<div id="budget-banner" style="display:none"></div>
 
 <!-- ===== CANVAS STAGE ===== -->
 <div id="stage">
@@ -692,6 +712,28 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     </div>
 </div>
 
+<!-- Embedded Browser Panel (human takeover / live watch) -->
+<div class="inbox-overlay" id="browser-overlay" onclick="closeBrowserPanel()"></div>
+<div class="browser-panel" id="browser-panel" role="complementary" aria-label="Team browser">
+    <div class="inbox-header">
+        <h3><span data-icon="globe" data-icon-size="14"></span> Browser <span id="browser-team-tag" class="master-model-tag"></span></h3>
+        <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn btn-sm" id="browser-done-btn" style="display:none" onclick="finishTakeover()" title="Hand control back to the agent">Done — hand back</button>
+            <button class="btn btn-sm btn-secondary" onclick="closeBrowserPanel()">Close</button>
+        </div>
+    </div>
+    <div class="browser-toolbar">
+        <input type="text" id="browser-url" class="control-input" placeholder="Enter a URL and press Enter…"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();browserNavigate();}">
+        <select id="browser-tabs" onchange="browserSwitchTab(this.value)" title="Open tabs"></select>
+        <button class="btn btn-sm btn-secondary" onclick="browserRefreshTabs()" title="Refresh tab list">Tabs</button>
+    </div>
+    <div class="browser-stage">
+        <canvas id="browser-canvas" width="1280" height="800" tabindex="0"></canvas>
+    </div>
+    <div class="browser-status" id="browser-status"><span><span class="dot"></span><span id="browser-status-text">Disconnected</span></span><span id="browser-hint">Click the page, then type. Scroll to pan.</span></div>
+</div>
+
 <!-- Respond Modal -->
 <div class="modal-bg" id="modal-respond">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-respond">
@@ -713,9 +755,94 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     </div>
 </div>
 
+<!-- Login Modal (shown only when the server requires an API key) -->
+<div class="modal-bg" id="modal-login">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-login">
+        <div class="modal-header" id="mh-login">API Key Required</div>
+        <div class="modal-body">
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">
+                This server requires an API key (set via <code>SWARM_API_KEY</code>). Enter it to continue.
+            </div>
+            <div class="control-group">
+                <label class="control-label" for="login-key">API Key</label>
+                <input type="password" class="control-input" id="login-key" placeholder="Paste your key…"
+                       onkeydown="if(event.key==='Enter'){event.preventDefault();submitApiKey();}">
+            </div>
+            <div id="login-error" style="display:none;color:var(--danger,#e5534b);font-size:12px;margin-top:6px"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn" onclick="submitApiKey()">Unlock</button>
+        </div>
+    </div>
+</div>
+
 <script>
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 const API_URL = `${window.location.protocol}//${window.location.host}`;
+
+/* ===== AUTH (optional shared API key) =================================== *
+ * The server guards every endpoint when SWARM_API_KEY is set. We attach the
+ * stored key to same-origin requests via a single window.fetch wrapper (so all
+ * ~42 call sites get it for free) and prompt for it on a 401. With no key set
+ * (localhost default) apiKey stays '' and nothing changes. */
+const AUTH_STORAGE_KEY = 'swarm_api_key';
+let apiKey = localStorage.getItem(AUTH_STORAGE_KEY) || '';
+let authRequired = false;
+let _loginShown = false;   // debounce: 3s/5s polls would 401-storm the modal
+
+const _origFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  if (!url.startsWith(API_URL)) return _origFetch(input, init);
+  init = init || {};
+  if (apiKey) {
+    const h = new Headers(init.headers || {});
+    h.set('X-API-Key', apiKey);
+    init.headers = h;
+  }
+  return _origFetch(input, init).then(res => {
+    if (res.status === 401) showLogin();
+    return res;
+  });
+};
+
+function showLogin() {
+  if (_loginShown) return;
+  _loginShown = true;
+  const err = document.getElementById('login-error');
+  if (err) err.style.display = 'none';
+  showModal('modal-login');
+}
+
+async function submitApiKey() {
+  const input = document.getElementById('login-key');
+  const candidate = (input.value || '').trim();
+  if (!candidate) return;
+  // Probe with the candidate directly (bypass the wrapper's stored key).
+  const probe = await _origFetch(`${API_URL}/auth/check`, { headers: { 'X-API-Key': candidate } })
+    .then(r => r.json()).catch(() => null);
+  if (probe && probe.authorized) {
+    apiKey = candidate;
+    localStorage.setItem(AUTH_STORAGE_KEY, apiKey);
+    _loginShown = false;
+    input.value = '';
+    hideModal('modal-login');
+    if (ws) { try { ws.close(); } catch (e) {} }   // reconnect carries the new key
+    connectWS(); loadTeams(); loadModels(); checkSetup(); refreshData();
+  } else {
+    const err = document.getElementById('login-error');
+    if (err) { err.textContent = 'Invalid API key'; err.style.display = 'block'; }
+  }
+}
+
+async function checkAuth() {
+  try {
+    const d = await fetch(`${API_URL}/auth/check`).then(r => r.json());
+    authRequired = !!d.auth_required;
+    if (authRequired && !d.authorized) showLogin();
+    else if (!authRequired && apiKey) { apiKey = ''; localStorage.removeItem(AUTH_STORAGE_KEY); }
+  } catch (e) { /* server unreachable; polls retry */ }
+}
 
 let ws = null, reconnectTimer = null, reconnectDelay = 1000;
 let agentData = {}, selectedAgent = null, eventCount = 0, msgCount = 0;
@@ -858,9 +985,9 @@ function connectWS() {
         scheduleReconnect();
         return;
     }
-    ws.onopen = () => { setWsStatus('connected', 'Live'); reconnectDelay = 1000; logEvent('system', 'Connected'); refreshData(); };
+    ws.onopen = () => { if (apiKey) { try { ws.send(JSON.stringify({action:'auth', api_key: apiKey})); } catch(e){} } setWsStatus('connected', 'Live'); reconnectDelay = 1000; logEvent('system', 'Connected'); refreshData(); };
     ws.onmessage = (e) => { try { handleWS(JSON.parse(e.data)); } catch(err) {} };
-    ws.onclose = () => { setWsStatus('disconnected', 'Disconnected'); logEvent('system', 'WS closed — reconnecting...'); scheduleReconnect(); };
+    ws.onclose = (e) => { if (e && e.code === 4401) showLogin(); setWsStatus('disconnected', 'Disconnected'); logEvent('system', 'WS closed — reconnecting...'); scheduleReconnect(); };
     ws.onerror = () => { setWsStatus('disconnected', 'Error'); };
 }
 
@@ -1015,6 +1142,14 @@ function handleWS(msg) {
             if (document.getElementById('inbox-panel').classList.contains('open')) loadInbox();
             break;
         case 'link_violation': logEvent('link_violation', `${payload.from_agent} → ${payload.to_agent} denied (${payload.reason})`); break;
+        case 'budget_exceeded':
+            logEvent('system', `⏸ ${payload.team_id} hit its daily budget ($${(payload.spent_usd||0).toFixed(2)})`);
+            if (payload.team_id === currentTeam) { teamBudget = payload; renderBudgetBanner(); loadTeamCosts(); }
+            break;
+        case 'budget_resumed':
+            logEvent('system', `▶ ${payload.team_id} resumed (${payload.reason || 'budget'})`);
+            if (payload.team_id === currentTeam) { teamBudget = payload; renderBudgetBanner(); loadTeamCosts(); }
+            break;
         case 'error': logEvent('error', `${payload.agent_name}: ${payload.error?.slice(0, 100)}`); break;
         case 'soul_updated': logEvent('system', `${payload.agent_name} soul updated`); break;
     }
@@ -2136,6 +2271,7 @@ const ICONS = {
     'message-square': '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     'zap': '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
     'compass': '<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
+    'globe': '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
     'history': '<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>',
     'bar-chart': '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
     'terminal': '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
@@ -2212,6 +2348,8 @@ function changeTeam(teamId) {
     currentTeam = teamId;
     selectedAgent = null;
     agentData = {};
+    teamBudget = {};               // clear the previous team's banner immediately
+    renderBudgetBanner();
     refreshData();
     loadTeamCosts();
 }
@@ -2231,18 +2369,77 @@ async function loadTeamCosts() {
         const el = document.getElementById('stat-cost');
         if (!wrap || !el) return;
         const t = d.totals;
+        const b = d.budget || {};
+        teamBudget = b;
         const anyUnpriced = Object.values(d.agents || {}).some(a => a.unpriced);
-        el.textContent = `$${(t.est_cost_usd || 0).toFixed(2)}${anyUnpriced ? '+' : ''}`;
+        const spent = `$${(t.est_cost_usd || 0).toFixed(2)}${anyUnpriced ? '+' : ''}`;
+        // Show spent / limit when a USD cap is set; turn red when blocked.
+        el.textContent = b.limit_usd > 0 ? `${spent} / $${b.limit_usd.toFixed(2)}` : spent;
+        el.style.color = b.blocked ? 'var(--danger,#e5534b)' : '';
         const fmtM = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : Math.round(n / 1e3) + 'k';
         const lines = Object.entries(d.agents || {})
             .sort((a, b) => (b[1].est_cost_usd || 0) - (a[1].est_cost_usd || 0))
             .map(([n, a]) => `${n}: $${(a.est_cost_usd || 0).toFixed(2)} · in ${fmtM(a.input_tokens)} · out ${fmtM(a.output_tokens)} · cache ${a.cache_hit_pct}%${a.unpriced ? ' (model unpriced)' : ''}`);
         lines.push(`team: ${t.turns} turns · cache hit ${t.cache_hit_pct}% · sweeps ${d.sweeps.queued} run / ${d.sweeps.skipped} skipped`);
+        if (b.limit_usd > 0 || b.limit_tokens > 0) {
+            lines.push(`budget: $${(b.spent_usd||0).toFixed(2)} / $${(b.limit_usd||0).toFixed(2)} today` +
+                (b.remaining_usd != null ? ` ($${b.remaining_usd.toFixed(2)} left)` : ''));
+        }
+        if (b.unpriced_turns > 0 && b.limit_usd > 0 && !b.limit_tokens)
+            lines.push('⚠ some turns use an unpriced model — set a token cap to enforce those');
+        lines.push('(click to set a daily budget)');
         wrap.title = lines.join('\n');
         wrap.style.display = '';
+        wrap.onclick = editBudget;
+        renderBudgetBanner();
     } catch (e) { /* non-fatal */ }
 }
 setInterval(loadTeamCosts, 60000);
+
+let teamBudget = {};
+
+function renderBudgetBanner() {
+    const el = document.getElementById('budget-banner');
+    if (!el) return;
+    const b = teamBudget || {};
+    if (!b.blocked) { el.style.display = 'none'; return; }
+    const resets = b.resets_at_ts ? new Date(b.resets_at_ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '00:00 UTC';
+    el.innerHTML = `<span>⏸ <strong>${esc(b.team_id || currentTeam)}</strong> paused — daily budget $${(b.spent_usd||0).toFixed(2)} / $${(b.limit_usd||0).toFixed(2)} reached. Resumes ${resets}.</span>` +
+        `<span class="bb-actions"><button class="btn btn-sm" onclick="editBudget()">Raise limit</button>` +
+        `<button class="btn btn-sm btn-secondary" onclick="resumeBudget()">Resume anyway</button></span>`;
+    el.style.display = 'flex';
+}
+
+async function editBudget() {
+    const b = teamBudget || {};
+    const cur = b.limit_usd || 0;
+    const val = prompt(`Daily spend cap for "${currentTeam}" in USD (0 = unlimited):`, cur);
+    if (val === null) return;
+    const usd = parseFloat(val);
+    if (isNaN(usd) || usd < 0) { logEvent('error', 'Enter a non-negative number.'); return; }
+    try {
+        const res = await fetch(`${API_URL}/teams/${encodeURIComponent(currentTeam)}/budget`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({daily_usd: usd, daily_tokens: b.limit_tokens || 0}),
+        });
+        const d = await res.json();
+        if (d.error) { logEvent('error', d.error); return; }
+        teamBudget = d;
+        logEvent('system', `Daily budget for ${currentTeam} set to $${usd.toFixed(2)}`);
+        renderBudgetBanner(); loadTeamCosts();
+    } catch (e) { logEvent('error', e.message); }
+}
+
+async function resumeBudget() {
+    try {
+        const res = await fetch(`${API_URL}/teams/${encodeURIComponent(currentTeam)}/budget/override`, { method: 'POST' });
+        const d = await res.json();
+        if (d.error) { logEvent('error', d.error); return; }
+        teamBudget = d;
+        logEvent('system', `${currentTeam} resumed for today (budget override)`);
+        renderBudgetBanner();
+    } catch (e) { logEvent('error', e.message); }
+}
 
 function showAddTeam() { showModal('modal-add-team'); }
 function showAddAgent() { showModal('modal-add-agent'); }
@@ -2261,6 +2458,8 @@ function showModal(id) {
 function hideModal(id) {
     const bg = document.getElementById(id);
     if (bg) bg.classList.remove('show');
+    // Dismissing the login modal only DEFERS it — the next 401 re-opens it.
+    if (id === 'modal-login') _loginShown = false;
     if (_modalReturnFocus && document.body.contains(_modalReturnFocus)) _modalReturnFocus.focus();
     _modalReturnFocus = null;
 }
@@ -2608,7 +2807,11 @@ function renderInbox() {
         }
         let actionHtml = '';
         if (q.status === 'pending') {
-            actionHtml = `<div style="margin-top:8px"><button class="btn btn-sm" onclick="openRespondModal('${jsAttr(q.id)}')">Respond</button></div>`;
+            const teamId = agentData[q.agent_name]?.config?.team_id || currentTeam;
+            const browserBtn = q.kind === 'takeover'
+                ? `<button class="btn btn-sm" onclick="openBrowserPanel('${jsAttr(teamId)}', {qid:'${jsAttr(q.id)}', agent:'${jsAttr(q.agent_name)}'})">${icon('globe', 11)} Open browser</button>`
+                : '';
+            actionHtml = `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${browserBtn}<button class="btn btn-sm btn-secondary" onclick="openRespondModal('${jsAttr(q.id)}')">Respond</button></div>`;
         }
         return `
             <div class="inbox-item ${statusClass}">
@@ -2666,6 +2869,145 @@ async function submitResponse() {
     } catch (e) { logEvent('error', e.message); }
 }
 
+/* ===== EMBEDDED BROWSER (human takeover / live watch) ================== */
+let browserWS = null;
+let browserTeam = null;
+let browserTakeoverQid = null;
+let browserTakeoverAgent = null;
+let _frameDevW = 1280, _frameDevH = 800;
+const _browserCanvas = () => document.getElementById('browser-canvas');
+
+function openBrowserPanel(teamId, opts = {}) {
+    teamId = teamId || currentTeam;
+    if (!teamId) { logEvent('error', 'Select a team first.'); return; }
+    browserTeam = teamId;
+    browserTakeoverQid = opts.qid || null;
+    browserTakeoverAgent = opts.agent || null;
+    document.getElementById('browser-team-tag').textContent = teamId;
+    document.getElementById('browser-done-btn').style.display = browserTakeoverQid ? '' : 'none';
+    document.getElementById('browser-overlay').classList.add('open');
+    document.getElementById('browser-panel').classList.add('open');
+    _bindBrowserCanvas();
+    connectBrowserWS(teamId);
+}
+
+function closeBrowserPanel() {
+    document.getElementById('browser-overlay').classList.remove('open');
+    document.getElementById('browser-panel').classList.remove('open');
+    if (browserWS) { try { browserWS.close(); } catch (e) {} browserWS = null; }
+    _setBrowserStatus(false, 'Disconnected');
+}
+
+function _setBrowserStatus(live, text) {
+    const bar = document.getElementById('browser-status');
+    bar.classList.toggle('live', !!live);
+    document.getElementById('browser-status-text').textContent = text;
+}
+
+function connectBrowserWS(teamId) {
+    if (browserWS) { try { browserWS.close(); } catch (e) {} }
+    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/teams/${encodeURIComponent(teamId)}/browser/ws`;
+    _setBrowserStatus(false, 'Connecting…');
+    let sock;
+    try { sock = new WebSocket(url); } catch (e) { _setBrowserStatus(false, 'Connect failed'); return; }
+    browserWS = sock;
+    sock.onopen = () => { if (apiKey) { try { sock.send(JSON.stringify({action:'auth', api_key: apiKey})); } catch(e){} } _setBrowserStatus(true, 'Live'); _sendBrowserResize(); browserRefreshTabs(); };
+    sock.onmessage = (e) => { try { _handleBrowserMsg(JSON.parse(e.data)); } catch (err) {} };
+    sock.onclose = (e) => { if (e && e.code === 4401) showLogin(); if (browserWS === sock) { browserWS = null; _setBrowserStatus(false, 'Disconnected'); } };
+    sock.onerror = () => { _setBrowserStatus(false, 'Error'); };
+}
+
+function _handleBrowserMsg(msg) {
+    if (msg.type === 'frame') {
+        const p = msg.payload || {};
+        if (p.deviceWidth) _frameDevW = p.deviceWidth;
+        if (p.deviceHeight) _frameDevH = p.deviceHeight;
+        const img = new Image();
+        img.onload = () => {
+            const c = _browserCanvas();
+            if (c.width !== img.naturalWidth) c.width = img.naturalWidth;
+            if (c.height !== img.naturalHeight) c.height = img.naturalHeight;
+            c.getContext('2d').drawImage(img, 0, 0);
+        };
+        img.src = 'data:image/jpeg;base64,' + p.data;
+    } else if (msg.type === 'tabs') {
+        const sel = document.getElementById('browser-tabs');
+        sel.innerHTML = (msg.payload.tabs || []).map(t =>
+            `<option value="${esc(t.targetId)}">${esc((t.title || t.url || 'tab').slice(0, 40))}</option>`).join('');
+    } else if (msg.type === 'error') {
+        _setBrowserStatus(false, msg.payload?.message || 'Error');
+        logEvent('error', 'Browser: ' + (msg.payload?.message || 'error'));
+    }
+}
+
+function _browserSend(obj) { if (browserWS && browserWS.readyState === WebSocket.OPEN) browserWS.send(JSON.stringify(obj)); }
+
+// Tell the headless browser to render at the panel's size, so the page lays out
+// to fit instead of being clipped. Debounced for window-resize storms.
+let _browserResizeTimer = null;
+function _sendBrowserResize() {
+    const stage = document.querySelector('.browser-stage');
+    if (!stage) return;
+    const w = Math.round(stage.clientWidth), h = Math.round(stage.clientHeight);
+    if (w > 0 && h > 0) _browserSend({type:'resize', width: w, height: h});
+}
+window.addEventListener('resize', () => {
+    if (!document.getElementById('browser-panel').classList.contains('open')) return;
+    clearTimeout(_browserResizeTimer);
+    _browserResizeTimer = setTimeout(_sendBrowserResize, 200);
+});
+
+// Map a DOM event on the canvas → CSS-viewport coordinates the page expects.
+function _canvasToPage(e) {
+    const c = _browserCanvas();
+    const r = c.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * _frameDevW;
+    const y = ((e.clientY - r.top) / r.height) * _frameDevH;
+    return { x: Math.max(0, x), y: Math.max(0, y) };
+}
+function _mods(e) { return (e.altKey?1:0) | (e.ctrlKey?2:0) | (e.metaKey?4:0) | (e.shiftKey?8:0); }
+
+let _browserBound = false;
+function _bindBrowserCanvas() {
+    if (_browserBound) return;
+    _browserBound = true;
+    const c = _browserCanvas();
+    const btn = (b) => b === 0 ? 'left' : b === 1 ? 'middle' : b === 2 ? 'right' : 'left';
+    c.addEventListener('mousedown', (e) => { e.preventDefault(); c.focus(); const p = _canvasToPage(e); _browserSend({type:'mouse', action:'pressed', ...p, button: btn(e.button), clickCount: e.detail || 1, modifiers: _mods(e)}); });
+    c.addEventListener('mouseup', (e) => { e.preventDefault(); const p = _canvasToPage(e); _browserSend({type:'mouse', action:'released', ...p, button: btn(e.button), clickCount: e.detail || 1, modifiers: _mods(e)}); });
+    c.addEventListener('mousemove', (e) => { const p = _canvasToPage(e); _browserSend({type:'mouse', action:'moved', ...p, modifiers: _mods(e)}); });
+    c.addEventListener('contextmenu', (e) => e.preventDefault());
+    c.addEventListener('wheel', (e) => { e.preventDefault(); const p = _canvasToPage(e); _browserSend({type:'mouse', action:'wheel', ...p, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: _mods(e)}); }, { passive: false });
+    c.addEventListener('keydown', (e) => {
+        e.preventDefault();
+        const printable = e.key.length === 1 && !e.ctrlKey && !e.metaKey;
+        _browserSend({type:'key', action:'down', key: e.key, code: e.code, text: printable ? e.key : '', windowsVirtualKeyCode: e.keyCode, modifiers: _mods(e)});
+    });
+    c.addEventListener('keyup', (e) => { e.preventDefault(); _browserSend({type:'key', action:'up', key: e.key, code: e.code, windowsVirtualKeyCode: e.keyCode, modifiers: _mods(e)}); });
+    c.addEventListener('paste', (e) => { e.preventDefault(); const t = (e.clipboardData || window.clipboardData).getData('text'); if (t) _browserSend({type:'text', text: t}); });
+}
+
+function browserNavigate() {
+    const url = document.getElementById('browser-url').value.trim();
+    if (url) _browserSend({type:'navigate', url});
+}
+function browserRefreshTabs() { _browserSend({type:'tabs'}); }
+function browserSwitchTab(targetId) { if (targetId) _browserSend({type:'switch_tab', targetId}); }
+
+async function finishTakeover() {
+    if (browserTakeoverQid && browserTakeoverAgent) {
+        try {
+            await fetch(`${API_URL}/inbox/${encodeURIComponent(browserTakeoverAgent)}/respond`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({response: 'done', question_id: browserTakeoverQid}),
+            });
+            logEvent('system', `Handed browser back to ${browserTakeoverAgent}`);
+            loadInbox();
+        } catch (e) { logEvent('error', e.message); }
+    }
+    closeBrowserPanel();
+}
+
 async function approveProposal(pid) {
     try {
         const res = await fetch(`${API_URL}/proposals/${encodeURIComponent(pid)}/approve`, { method: 'POST' });
@@ -2695,6 +3037,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Keep the network framed when the window resizes.
     let _rsz = null;
     window.addEventListener('resize', () => { clearTimeout(_rsz); _rsz = setTimeout(fitView, 150); });
+    checkAuth();
     connectWS();
     loadTeams();
     loadModels();
