@@ -11,6 +11,10 @@ and steer the whole team from one web UI.
 - **Self-aware agents** — agents can read their own config/telemetry and *propose* changes for your approval.
 - **Human inbox** — agents ask you for logins/decisions; you reply from the dashboard.
 
+> **New here?** The **[Getting Started guide](docs/getting-started.md)** walks
+> you from download through building and running your first team. Exposing it on
+> a server? See **[Deploying on a VPS](docs/deploy-vps.md)**.
+
 ---
 
 ## Prerequisites
