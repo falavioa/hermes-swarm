@@ -1,13 +1,26 @@
-"""crawl4ai-backed web_search + web_extract handlers, with ddgs / httpx fallback.
+"""Zero-config web_search + web_extract fallback (crawl4ai → ddgs / httpx).
 
-These replace Hermes' built-in `web_search` and `web_extract` tool handlers so
-EVERY agent (current and future) uses crawl4ai as the primary web search + fetch
-engine, falling back to ddgs (search) / httpx (fetch) only when crawl4ai fails.
+Hermes ships a full multi-backend web system (firecrawl, parallel, tavily, exa,
+searxng, brave-free, ddgs, …) selected from the user's API keys / config.yaml.
+We deliberately do NOT replace a backend the user has actually configured — that
+would silently downgrade a paid/JS-rendering provider (e.g. firecrawl) to a raw
+HTTP fetch. Instead this module fills the *gap*:
 
-The override is installed from swarm_server.tools._register_custom_tools() via
-install_crawl4ai_web_tools(), which re-registers the existing tool names with
-registry.register(..., override=True) so the schema/interface agents see is
-unchanged — only the implementation swaps.
+  * Hermes' zero-config **search** default is ddgs and it works — so we leave it.
+  * Hermes has **no** zero-config **extract** backend: with no provider keys,
+    ``get_active_extract_provider()`` returns None and ``web_extract`` fails with
+    a "configure a provider" error. That's the gap we close.
+
+``install_crawl4ai_web_tools()`` therefore overrides a capability ONLY when
+Hermes has no available provider for it (asking Hermes' own resolver, so we never
+duplicate its selection logic). When it does override, it uses crawl4ai as the
+primary engine if that optional package is installed (JS rendering via the
+``[web]`` extra), and falls back to ddgs (search) / httpx (fetch) otherwise —
+both of which are core dependencies, so the fallback always works.
+
+Called from swarm_server.tools._register_custom_tools() (team agents) and the
+Architect setup in master.py; re-registers the existing tool names with
+registry.register(..., override=True) so the schema agents see is unchanged.
 
 Handlers are SYNC and run the async crawl4ai code in a FRESH event loop on a
 dedicated thread, so they work no matter what loop/thread context Hermes invokes
@@ -226,19 +239,61 @@ def web_extract_handler(args: dict, **kwargs) -> str:
 # --------------------------------------------------------------------------- #
 # installer — called from _register_custom_tools()
 # --------------------------------------------------------------------------- #
-_INSTALLED = False
+# Tools we have already overridden in this process (avoids noisy re-logging when
+# every agent's setup calls the installer; registry.register is idempotent).
+_OVERRIDDEN: set = set()
+
+
+def _hermes_has_provider(capability: str) -> bool:
+    """True when Hermes already has a web provider for ``capability`` ("search"
+    or "extract") that we must not clobber — either one the user explicitly
+    configured (config.yaml ``web.backend`` / ``web.{cap}_backend``) or one that
+    is available from their API keys. False when none is configured/available
+    (the gap we fill).
+
+    Reuses Hermes' own resolver so our gate never drifts from its selection
+    logic. ``get_active_*_provider`` returns an explicitly-configured provider
+    even without credentials (so the user gets Hermes' precise "add your key"
+    error rather than a silent swap to our HTTP fetch), and otherwise returns the
+    highest-priority provider the user actually has credentials for — or None.
+    Fails open to False (override) if Hermes' registry can't be queried, so a
+    fresh install still gets a working fallback."""
+    try:
+        from agent.web_search_registry import (
+            get_active_search_provider,
+            get_active_extract_provider,
+        )
+    except Exception:  # noqa: BLE001 — older/newer Hermes without this registry
+        return False
+
+    getter = get_active_search_provider if capability == "search" else get_active_extract_provider
+    try:
+        provider = getter()
+        if provider is None:
+            return False
+        supports = provider.supports_search() if capability == "search" else provider.supports_extract()
+        return bool(supports)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[web_crawl4ai] provider probe for '%s' failed: %s", capability, exc)
+        return False
 
 
 def install_crawl4ai_web_tools(registry) -> bool:
-    """Override built-in web_search / web_extract handlers with crawl4ai-backed
-    ones, reusing the existing schemas so the agent-facing interface is identical.
-    Idempotent. Returns True if the override is in place."""
-    global _INSTALLED
-    if _INSTALLED:
-        return True
-    overrides = (("web_search", web_search_handler), ("web_extract", web_extract_handler))
-    installed_any = False
-    for name, handler in overrides:
+    """Install our zero-config web fallback, but ONLY for capabilities Hermes has
+    no provider for (see module docstring + ``_hermes_has_provider``). Safe to
+    call repeatedly (per-agent setup does). Returns True if any override is now
+    in place from this process."""
+    overrides = (
+        ("web_search", web_search_handler, "search"),
+        ("web_extract", web_extract_handler, "extract"),
+    )
+    for name, handler, capability in overrides:
+        if name in _OVERRIDDEN:
+            continue
+        if _hermes_has_provider(capability):
+            log.info("[web_crawl4ai] Hermes has a configured '%s' provider — "
+                     "leaving built-in '%s' in place.", capability, name)
+            continue
         schema = registry.get_schema(name)
         if not schema:
             # Built-in web toolset not present in this build; define a minimal schema.
@@ -282,9 +337,9 @@ def install_crawl4ai_web_tools(registry) -> bool:
                 max_result_size_chars=_MAX_CONTENT_CHARS,
                 description=schema.get("description", ""),
             )
-            installed_any = True
-            log.info("[web_crawl4ai] Overrode '%s' with crawl4ai-backed handler", name)
+            _OVERRIDDEN.add(name)
+            log.info("[web_crawl4ai] No Hermes '%s' provider — installed crawl4ai/"
+                     "httpx fallback for '%s'.", capability, name)
         except Exception as exc:  # noqa: BLE001
             log.error("[web_crawl4ai] Failed to override '%s': %s", name, exc)
-    _INSTALLED = installed_any
-    return installed_any
+    return bool(_OVERRIDDEN)

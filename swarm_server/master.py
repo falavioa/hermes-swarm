@@ -137,6 +137,13 @@ detail. You also have web_search and web_extract to research a domain, product,
 competitor, or best practices before proposing a team — use them when the goal
 involves a space you should understand first.
 
+When the human gives you a specific URL (their site, a product, a competitor),
+call web_extract on that exact URL and base what you say on what it returns. Do
+NOT describe a page from web_search snippets or from the domain name — that is
+how you end up confidently wrong about what their product is. If web_extract
+genuinely fails for a URL, say so plainly and ask the human to paste the key
+details; never invent the page's contents to cover the gap.
+
 # What the framework is
 
 A "team" is a named group of agents working a shared goal. Each AGENT is an
@@ -900,6 +907,25 @@ class MasterAgent:
             # Defensive: ensure every master tool is present even if the toolset
             # filter missed one (ordering / version differences).
             self._attach_master_tools()
+
+            # The Architect researches a domain with web_search / web_extract
+            # while designing a team. Team agents get the same treatment in
+            # tools._register_custom_tools(), but the Architect can run before any
+            # team agent exists. Install our zero-config web fallback now so that
+            # on an unconfigured host web_extract works at all (Hermes has no
+            # zero-config extract backend — it would otherwise fail, which the
+            # model rationalised as "the URL is unsupported"). This is conditional
+            # and capability-scoped: a user who configured firecrawl/tavily/etc
+            # keeps it untouched. Runs AFTER AIAgent init so Hermes' provider
+            # registry is populated for that check.
+            try:
+                from tools.registry import registry as _hermes_registry
+                from swarm_server.web_crawl4ai import install_crawl4ai_web_tools
+
+                install_crawl4ai_web_tools(_hermes_registry)
+            except Exception as _e:  # noqa: BLE001
+                log.warning("[master] web fallback install skipped: %s", _e)
+
             self._wire_callbacks()
             log.info("[master] agent ready (model=%s)", model)
 

@@ -107,5 +107,11 @@ cancel their own via the `schedule_wakeup` / `cancel_wakeup` tools.
   route. See [`docs/deploy-vps.md`](docs/deploy-vps.md) for a hardened setup.
 - **Chromium** is required only for the browser-publishing tools; everything
   else works without it (the swarm degrades gracefully).
+- **Web research:** agents get `web_search` + `web_extract`. Search works with no
+  setup (DuckDuckGo). For *extract*, if you've configured a Hermes web backend
+  (Firecrawl/Tavily/Exa/… via `hermes tools` or API-key env vars) the swarm uses
+  it untouched; otherwise it falls back to a built-in fetcher — `httpx` out of
+  the box (fine for normal pages), or install `pip install .[web]` (crawl4ai +
+  `playwright install chromium`) for JavaScript-heavy single-page apps.
 - **Data & backups:** state lives in `SWARM_DATA_DIR`; every config save keeps a
   rotating backup under `<data>/config_backups/`.

@@ -254,6 +254,7 @@ logins persist across restarts too.
 | "Hermes NOT importable" | `pip install hermes-agent`, or set `HERMES_AGENT_PATH`. Run `hermes-swarm doctor`. |
 | "LLM backend NOT reachable" | Check `SWARM_LLM_BASE_URL` / `SWARM_LLM_API_KEY`; make sure the endpoint serves `SWARM_DEFAULT_MODEL`. |
 | Browser tools unavailable | `playwright install chromium` (or install Chrome). Everything else still works. |
+| Agent/Architect can't read a page or describes a URL wrongly | `web_extract` had no backend. Search works out of the box; for extract either configure a Hermes web backend (Firecrawl/Tavily/Exa) or install `pip install .[web]` (crawl4ai) for JS-heavy sites. A configured Hermes backend is always used as-is. |
 | Agents idle and doing nothing | Send a task, or mark the coordinator **autonomous** so it self-drives. |
 | Costs climbing fast | Set a per-team daily budget (§7). |
 

@@ -30,6 +30,16 @@ dependencies = [
     "hermes-agent[all]>=0.15.2",
 ]
 
+[project.optional-dependencies]
+# JS-rendering web fetch for the zero-config web_extract fallback (see
+# swarm_server/web_crawl4ai.py). Without it, the fallback still works via httpx
+# (a core dep) — fine for server-rendered pages, but single-page apps that need
+# a real browser to paint their content come back empty. Install with
+# `pip install hermes-swarm[web]` and run `playwright install chromium`. Only
+# used when the user hasn't configured a Hermes extract backend (firecrawl/
+# tavily/exa/…), which always takes precedence.
+web = ["crawl4ai"]
+
 [project.scripts]
 hermes-swarm = "swarm_server.cli:main"
 
