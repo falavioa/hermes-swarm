@@ -125,7 +125,12 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 
 /* ===== DOCKED OVERLAY PANELS ===== */
 .ov { position: fixed; z-index: 50; background: rgba(5,5,6,0.88); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); border: 1px solid var(--border-strong); border-radius: var(--r-lg); box-shadow: 0 24px 60px -32px rgba(0,0,0,0.9); display: flex; flex-direction: column; overflow: hidden; }
-.ov-agents { top: calc(var(--topbar-h) + 12px); left: 14px; width: 304px; max-height: calc(50vh); }
+.ov-agents { top: calc(var(--topbar-h) + 12px); left: 14px; width: 304px; max-height: 34vh; }
+/* Workspace files dock in the middle of the left column, between agents (top)
+   and task queues (bottom). Anchored top+bottom so it fills the gap; collapsing
+   drops the bottom anchor (same trick as .ov-right) so it shrinks to its header. */
+.ov-workspace { top: calc(var(--topbar-h) + 12px + 34vh + 8px); left: 14px; width: 304px; bottom: calc(32vh + 22px); }
+.ov-workspace.collapsed { bottom: auto; }
 .ov-queue { left: 14px; bottom: 14px; width: 304px; max-height: 32vh; }
 .ov-right { top: calc(var(--topbar-h) + 12px); right: 14px; bottom: 14px; width: 404px; max-width: calc(100vw - 28px); }
 /* Right panel is anchored top+bottom, so collapsing must drop the bottom
@@ -169,6 +174,19 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .queue-bar-track { flex: 1; height: 5px; background: var(--bg-hover); border-radius: 0; overflow: hidden; }
 .queue-bar-fill { height: 100%; border-radius: 0; background: var(--accent); transition: width 0.5s cubic-bezier(.4,0,.2,1); }
 .queue-bar-count { width: 22px; text-align: right; font-size: 12px; font-weight: 600; font-family: var(--font-mono); }
+/* Workspace file browser (left-column middle panel) */
+.ws-list { display: flex; flex-direction: column; gap: 1px; }
+.ws-item { display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: var(--r-sm); cursor: pointer; font-size: 11.5px; color: var(--text-secondary); font-family: var(--font-mono); }
+.ws-item:hover { background: var(--bg-hover); color: var(--text); }
+.ws-item .ws-ic { color: var(--text-dim); flex-shrink: 0; display: flex; }
+.ws-item .ws-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.ws-item .ws-size { margin-left: auto; font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.ws-fileview { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.ws-fileview-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
+.ws-fileview-head .ws-fname { font-family: var(--font-mono); font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; flex: 1; }
+.ws-back { cursor: pointer; color: var(--text-muted); padding: 2px 7px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); font-size: 11px; user-select: none; flex-shrink: 0; }
+.ws-back:hover { color: var(--text); border-color: #4A4A52; }
+.ws-fileview pre { flex: 1; overflow: auto; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px; font-family: var(--font-mono); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; margin: 0; min-height: 0; }
 .message-list { display: flex; flex-direction: column; gap: 8px; }
 .msg-block { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; animation: slideIn 0.25s ease-out; }
 @keyframes slideIn { from { opacity:0; transform: translateY(6px); } }
@@ -434,13 +452,13 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 @media (max-width: 1100px) {
-    .ov-agents, .ov-queue { width: 260px; }
+    .ov-agents, .ov-queue, .ov-workspace { width: 260px; }
     .ov-right { width: 340px; }
     .ov-log { left: 288px; right: 368px; }
 }
 @media (max-width: 820px) {
     .ov-agents { width: calc(100vw - 28px); max-height: 38vh; }
-    .ov-queue { display: none; }
+    .ov-queue, .ov-workspace { display: none; }
     .ov-right { width: calc(100vw - 28px); top: auto; height: 46vh; }
     .ov-log { left: 14px; right: 14px; }
     .zoom-controls { left: auto; right: 16px; transform: none; bottom: auto; top: calc(var(--topbar-h) + 8px); }
@@ -470,6 +488,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
         </button>
         <button class="btn btn-sm btn-secondary" onclick="showModelSettings(false)" title="Default model for all agents"><span data-icon="cpu" data-icon-size="13"></span> Model</button>
         <button class="btn btn-sm btn-secondary" onclick="openBrowserPanel(currentTeam)" title="Watch & control this team's browser live"><span data-icon="globe" data-icon-size="13"></span> Browser</button>
+        <button id="team-pause-btn" class="btn btn-sm btn-secondary" data-mode="pause" onclick="toggleTeamPause()" style="display:none" title="Freeze every agent on this team"><span data-icon="clock" data-icon-size="13"></span> Pause team</button>
         <label for="team-select" class="sr-only">Team</label>
         <select id="team-select" onchange="changeTeam(this.value)"><option value="">Loading teams...</option></select>
         <button class="btn btn-sm btn-secondary" onclick="showAddTeam()">+ New Team</button>
@@ -505,6 +524,20 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
         </div>
     </div>
     <div class="panel-body" id="agent-list">
+        <div class="empty-state"><div class="empty-state-icon"><span data-icon="search" data-icon-size="26"></span></div><div>Select a team</div></div>
+    </div>
+</div>
+
+<!-- Workspace files (left column, between agents and task queues) -->
+<div class="ov ov-workspace" id="ov-workspace">
+    <div class="panel-header">
+        <span>Workspace</span>
+        <div class="ph-actions">
+            <button class="btn btn-sm btn-secondary" onclick="loadWorkspace(true)" title="Refresh file list" aria-label="Refresh workspace files"><span data-icon="history" data-icon-size="12"></span></button>
+            <button class="bare ov-collapse" onclick="togglePanel('ov-workspace')" title="Collapse" aria-label="Collapse workspace panel" aria-expanded="true"><span data-icon="chevron-down" data-icon-size="12"></span></button>
+        </div>
+    </div>
+    <div class="panel-body" id="workspace-body">
         <div class="empty-state"><div class="empty-state-icon"><span data-icon="search" data-icon-size="26"></span></div><div>Select a team</div></div>
     </div>
 </div>
@@ -1329,17 +1362,32 @@ function renderNetwork() {
         html += `<path class="conn ${cls}" d="${d}" fill="none" stroke="${color}" stroke-width="${width}" stroke-opacity="${opacity}"${dash?` stroke-dasharray="${dash}"`:''}${arrow?` marker-end="url(#${arrow})"`:''} data-from="${escAttr(a)}" data-to="${escAttr(b)}"/>`;
     };
 
-    // Split mutual links into reporting (parent/child) vs lateral peer links.
-    const hierarchy = [], peer = [];
+    // Classify links by the REAL data model, not a synthesized org chart.
+    // Connections are bidirectional peer links (set_agent_peers writes both
+    // sides), and a supervisor is simply an agent flagged is_supervisor that is
+    // linked to the agents it watches. So:
+    //   • a link where exactly one endpoint is a supervisor  -> supervision
+    //     edge, directed supervisor -> watched agent.
+    //   • every other mutual link (worker<->worker)          -> lateral peer.
+    //   • a stray one-way link (asymmetric config)           -> faint directed.
+    // There is no worker reporting hierarchy in the framework, so we no longer
+    // invent parent/child "reports" arrows (the BFS above is layout-only).
+    const supervise = [], peer = [], oneway = [];
     mutualPairs.forEach(([a,b]) => {
-        if (parent[a] === b) hierarchy.push([b,a]);
-        else if (parent[b] === a) hierarchy.push([a,b]);
+        if (isSup(a) && !isSup(b)) supervise.push([a,b]);
+        else if (isSup(b) && !isSup(a)) supervise.push([b,a]);
         else peer.push([a,b]);
     });
+    watchEdges.forEach(([a,b]) => {
+        if (isSup(a) && !isSup(b)) supervise.push([a,b]);
+        else if (isSup(b) && !isSup(a)) supervise.push([b,a]);
+        else oneway.push([a,b]);
+    });
 
-    watchEdges.forEach(([a,b]) => addEdge(a,b,'watch','#5B9DFF',1.4,0.55,'5 4','arrowW',true));
+    // Peers (and stray one-way links) underneath; supervision arrows on top.
     peer.forEach(([a,b]) => addEdge(a,b,'peer','#6B6B74',1.7,0.7,null,null,true));
-    hierarchy.forEach(([a,b]) => addEdge(a,b,'tree','#D4D4D8',1.5,0.7,null,'arrowP',false));
+    oneway.forEach(([a,b]) => addEdge(a,b,'oneway','#6B6B74',1.4,0.5,'2 4','arrowP',true));
+    supervise.forEach(([s,w]) => addEdge(s,w,'watch','#5B9DFF',1.6,0.6,'5 4','arrowW',true));
 
     // --- Nodes -------------------------------------------------------------
     names.forEach(n => {
@@ -1362,14 +1410,13 @@ function renderNetwork() {
     // --- Legend ------------------------------------------------------------
     const ly = H - 12;
     html += `<g font-size="9" font-family="Barlow, sans-serif" pointer-events="none">
-        <line x1="14" y1="${ly}" x2="32" y2="${ly}" stroke="#D4D4D8" stroke-width="1.5"/><text x="36" y="${ly+3}" fill="#8E8E96">reports</text>
-        <line x1="92" y1="${ly}" x2="110" y2="${ly}" stroke="#6B6B74" stroke-width="1.5"/><text x="114" y="${ly+3}" fill="#8E8E96">peers</text>
-        <line x1="160" y1="${ly}" x2="178" y2="${ly}" stroke="#5B9DFF" stroke-width="1.5" stroke-dasharray="4 3"/><text x="182" y="${ly+3}" fill="#8E8E96">watches</text>
+        <line x1="14" y1="${ly}" x2="32" y2="${ly}" stroke="#6B6B74" stroke-width="1.7"/><text x="36" y="${ly+3}" fill="#8E8E96">peers</text>
+        <line x1="84" y1="${ly}" x2="102" y2="${ly}" stroke="#5B9DFF" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#arrowW)"/><text x="108" y="${ly+3}" fill="#8E8E96">supervises</text>
       </g>`;
 
     svg.innerHTML = html;
     document.getElementById('net-info').textContent =
-        `${names.length} agents · ${hierarchy.length} reporting · ${peer.length} peer · ${watchEdges.length} watching`;
+        `${names.length} agents · ${peer.length} peer · ${supervise.length} supervised`;
 
     // Auto-fit only when the agent set changes (new agent, team switch, first
     // render) — never on routine WS ticks, which would yank the user's view.
@@ -2099,6 +2146,7 @@ function updateStats() {
     document.getElementById('stat-busy').textContent = names.filter(n => agentData[n]?.state === 'busy').length;
     document.getElementById('stat-queued').textContent = names.reduce((s, n) => s + (agentData[n]?.pending_count || 0), 0);
     document.getElementById('stat-events').textContent = eventCount;
+    updateTeamPauseBtn();
 }
 
 function selectAgent(name) {
@@ -2341,6 +2389,7 @@ async function loadTeams() {
         }
         refreshData();
         loadTeamCosts();
+        loadWorkspace(true);
     } catch (e) { console.error(e); }
 }
 
@@ -2352,6 +2401,69 @@ function changeTeam(teamId) {
     renderBudgetBanner();
     refreshData();
     loadTeamCosts();
+    loadWorkspace(true);
+}
+
+/* ===== TEAM WORKSPACE (shared project files) =====
+   Read-only browser of the team's shared project dir (GET /teams/{id}/workspace
+   + /workspace/file). Lets the operator see what the team is producing. */
+let _wsFiles = [];
+function _fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+}
+function _wsEmpty(msg) {
+    return `<div class="empty-state"><div class="empty-state-icon"><span data-icon="search" data-icon-size="26"></span></div><div>${esc(msg)}</div></div>`;
+}
+async function loadWorkspace(force) {
+    const body = document.getElementById('workspace-body');
+    if (!body) return;
+    if (!currentTeam) { body.innerHTML = _wsEmpty('Select a team'); hydrateIcons(body); return; }
+    const team = currentTeam;
+    try {
+        const res = await fetch(`${API_URL}/teams/${encodeURIComponent(team)}/workspace`);
+        const d = await res.json();
+        if (currentTeam !== team) return;          // stale-response guard
+        _wsFiles = d.files || [];
+        renderWorkspaceList(d);
+    } catch (e) {
+        if (currentTeam === team) { body.innerHTML = _wsEmpty('Could not load workspace'); hydrateIcons(body); }
+    }
+}
+function renderWorkspaceList(d) {
+    const body = document.getElementById('workspace-body');
+    if (!body) return;
+    if (d && d.exists === false) { body.innerHTML = _wsEmpty('No project files yet'); hydrateIcons(body); return; }
+    if (!_wsFiles.length) { body.innerHTML = _wsEmpty('Workspace is empty'); hydrateIcons(body); return; }
+    let html = '<div class="ws-list">';
+    _wsFiles.forEach(f => {
+        html += `<div class="ws-item" onclick="openWorkspaceFile('${jsAttr(f.path)}')" title="${escAttr(f.path)}"><span class="ws-ic" data-icon="terminal" data-icon-size="11"></span><span class="ws-path">${esc(f.path)}</span><span class="ws-size">${_fmtBytes(f.size)}</span></div>`;
+    });
+    html += '</div>';
+    if (d && d.truncated) html += `<div style="font-size:10px;color:var(--text-dim);padding:6px 8px">Showing first ${_wsFiles.length} files…</div>`;
+    body.innerHTML = html;
+    hydrateIcons(body);
+}
+async function openWorkspaceFile(path) {
+    const body = document.getElementById('workspace-body');
+    if (!body || !currentTeam) return;
+    const team = currentTeam;
+    const head = `<div class="ws-fileview-head"><span class="ws-back" onclick="renderWorkspaceList()">← Files</span><span class="ws-fname" title="${escAttr(path)}">${esc(path)}</span></div>`;
+    body.innerHTML = `<div class="ws-fileview">${head}<pre>Loading…</pre></div>`;
+    try {
+        const res = await fetch(`${API_URL}/teams/${encodeURIComponent(team)}/workspace/file?path=${encodeURIComponent(path)}`);
+        const d = await res.json();
+        if (currentTeam !== team) return;
+        let inner;
+        if (d.error) inner = esc(d.error);
+        else if (d.too_large) inner = `File is too large to preview (${_fmtBytes(d.size)}).`;
+        else if (d.binary) inner = `Binary file (${_fmtBytes(d.size)}) — preview not available.`;
+        else inner = esc(d.content || '');
+        body.innerHTML = `<div class="ws-fileview">${head}<pre>${inner}</pre></div>`;
+    } catch (e) {
+        if (currentTeam === team) body.innerHTML = `<div class="ws-fileview">${head}<pre>Could not open file.</pre></div>`;
+    }
 }
 
 /* ===== TEAM COSTS (24h) =====
@@ -2557,6 +2669,43 @@ async function resumeAgent(name) {
         const data = await res.json();
         if (data.error) { logEvent('error', data.error); return; }
         logEvent('system', data.message);
+    } catch (e) { logEvent('error', e.message); }
+}
+
+/* ===== TEAM-WIDE PAUSE ===== */
+// True when every running agent on the current team is paused (drives the
+// topbar toggle: all-paused -> offer Resume, otherwise -> offer Pause).
+function teamAllPaused() {
+    const names = Object.keys(agentData);
+    return names.length > 0 && names.every(n => agentData[n]?.state === 'paused');
+}
+function updateTeamPauseBtn() {
+    const btn = document.getElementById('team-pause-btn');
+    if (!btn) return;
+    const names = Object.keys(agentData);
+    btn.style.display = currentTeam && names.length ? '' : 'none';
+    const allPaused = teamAllPaused();
+    btn.dataset.mode = allPaused ? 'resume' : 'pause';
+    btn.title = allPaused ? 'Resume every paused agent on this team'
+                          : 'Freeze every agent on this team (queues are kept)';
+    btn.innerHTML = `<span data-icon="${allPaused ? 'zap' : 'clock'}" data-icon-size="13"></span> ${allPaused ? 'Resume team' : 'Pause team'}`;
+    btn.classList.toggle('btn-success', allPaused);
+    hydrateIcons(btn);
+}
+async function toggleTeamPause() {
+    if (!currentTeam) return;
+    const resume = document.getElementById('team-pause-btn')?.dataset.mode === 'resume';
+    if (!resume && !confirm(`Pause ALL agents on team "${currentTeam}"?\n\nEach agent's current turn is interrupted but its queue is preserved. Resume to continue.`)) return;
+    try {
+        const res = await fetch(`${API_URL}/teams/${encodeURIComponent(currentTeam)}/${resume ? 'resume' : 'pause'}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: 'Team paused by operator' }),
+        });
+        const data = await res.json();
+        if (data.error) { logEvent('error', data.error); return; }
+        const n = resume ? (data.resumed || []).length : (data.paused || []).length;
+        logEvent('system', `${resume ? 'Resumed' : 'Paused'} ${n}/${data.total} agent(s) on ${currentTeam}.`);
+        refreshData();
     } catch (e) { logEvent('error', e.message); }
 }
 

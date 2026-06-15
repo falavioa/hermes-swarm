@@ -661,6 +661,106 @@ async def delete_team_credential(team_id: str, site: str):
 
 
 # ---------------------------------------------------------------------------
+# Team workspace — read-only file browser of the team's SHARED project dir (the
+# real work surface every agent reads/writes). Lets the operator see what the
+# team is actually producing without shelling into the host.
+# ---------------------------------------------------------------------------
+_WORKSPACE_MAX_FILES = 2000          # cap the tree so a huge repo can't hang the UI
+_WORKSPACE_MAX_FILE_BYTES = 512 * 1024   # 512 KB per file view
+# Directories that are noise (deps / VCS / caches) — skip them in the tree.
+_WORKSPACE_SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache",
+    ".pytest_cache", ".ruff_cache", ".next", "dist", "build", ".cache",
+}
+
+
+def _resolve_project_dir(team_id: str):
+    """Return (project_dir Path, error_response_or_None). 404s an unknown team."""
+    cfg = load_agents_config()
+    if team_id not in (cfg.get("teams", {}) or {}):
+        return None, JSONResponse({"error": f"Unknown team '{team_id}'."}, status_code=404)
+    from swarm_server.config import _get_project_dir
+    return _get_project_dir(team_id, cfg).resolve(), None
+
+
+@app.get("/teams/{team_id}/workspace")
+async def get_team_workspace(team_id: str):
+    """List the team's shared project directory as a flat, sorted file tree.
+
+    Paths are relative to the project root; directories are skipped if they're
+    dependency/cache noise. Capped at ``_WORKSPACE_MAX_FILES`` entries."""
+    import os
+
+    root, err = _resolve_project_dir(team_id)
+    if err:
+        return err
+    if not root.exists():
+        return JSONResponse({"team_id": team_id, "root": str(root),
+                             "exists": False, "files": []})
+
+    files = []
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune noise dirs in place so os.walk doesn't descend into them.
+        dirnames[:] = sorted(d for d in dirnames if d not in _WORKSPACE_SKIP_DIRS
+                             and not d.startswith("."))
+        for fn in sorted(filenames):
+            if fn.startswith("."):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root)
+            files.append({"path": rel, "size": st.st_size, "mtime": st.st_mtime})
+            if len(files) >= _WORKSPACE_MAX_FILES:
+                truncated = True
+                break
+        if truncated:
+            break
+
+    files.sort(key=lambda f: f["path"])
+    return JSONResponse({"team_id": team_id, "root": str(root), "exists": True,
+                         "truncated": truncated, "files": files})
+
+
+@app.get("/teams/{team_id}/workspace/file")
+async def get_team_workspace_file(team_id: str, path: str):
+    """Return the text content of one file inside the team's project dir.
+
+    Path-traversal safe: the resolved target must stay within the project root.
+    Binary files and oversized files are reported rather than dumped."""
+    import os
+
+    root, err = _resolve_project_dir(team_id)
+    if err:
+        return err
+
+    # Resolve and confine: the realpath must be inside the project root.
+    target = (root / path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return JSONResponse({"error": "Path escapes the workspace."}, status_code=400)
+    if not target.is_file():
+        return JSONResponse({"error": "File not found."}, status_code=404)
+
+    size = target.stat().st_size
+    if size > _WORKSPACE_MAX_FILE_BYTES:
+        return JSONResponse({"path": path, "size": size, "too_large": True,
+                             "content": "", "max_bytes": _WORKSPACE_MAX_FILE_BYTES})
+    raw = target.read_bytes()
+    if b"\x00" in raw:
+        return JSONResponse({"path": path, "size": size, "binary": True, "content": ""})
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        content = raw.decode("utf-8", "replace")
+    return JSONResponse({"path": path, "size": size, "content": content})
+
+
+# ---------------------------------------------------------------------------
 # Team costs — REAL provider token counts (token_usage events), priced with
 # the swarm-side map. LiteLLM's Postgres SpendLogs stay the billing ground
 # truth; this is the operational view: who spends, cache hit rates, sweep
@@ -1623,6 +1723,50 @@ async def resume_agent_execution(agent_name: str):
         return JSONResponse({"success": True, "message": f"Agent '{agent_name}' is not paused."})
     daemon.resume_execution(by="human")
     return JSONResponse({"success": True, "message": f"Agent '{agent_name}' resumed."})
+
+
+def _team_daemons(team_id: str):
+    """Live daemons whose agent belongs to ``team_id``."""
+    return [d for n, d in daemons.items()
+            if (d.cfg or {}).get("team_id") == team_id]
+
+
+@app.post("/teams/{team_id}/pause")
+async def pause_team_execution(team_id: str, request: Request):
+    """Freeze every agent on the team at once (each keeps its queue). The
+    counterpart to the per-agent brake — one click to halt a whole team."""
+    members = _team_daemons(team_id)
+    if not members:
+        return JSONResponse({"error": f"No running agents for team '{team_id}'."},
+                            status_code=404)
+    reason = ""
+    try:
+        reason = ((await request.json()) or {}).get("reason", "")
+    except Exception:
+        pass
+    paused = []
+    for d in members:
+        if not getattr(d, "_paused", False):
+            d.pause_execution(reason=reason or "Team paused by operator", by="human")
+            paused.append(d.name)
+    return JSONResponse({"success": True, "team_id": team_id,
+                         "paused": paused, "total": len(members)})
+
+
+@app.post("/teams/{team_id}/resume")
+async def resume_team_execution(team_id: str):
+    """Lift the freeze on every paused agent in the team."""
+    members = _team_daemons(team_id)
+    if not members:
+        return JSONResponse({"error": f"No running agents for team '{team_id}'."},
+                            status_code=404)
+    resumed = []
+    for d in members:
+        if getattr(d, "_paused", False):
+            d.resume_execution(by="human")
+            resumed.append(d.name)
+    return JSONResponse({"success": True, "team_id": team_id,
+                         "resumed": resumed, "total": len(members)})
 
 
 # ---------------------------------------------------------------------------
