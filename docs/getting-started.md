@@ -30,6 +30,22 @@ pulled in automatically, and the `hermes` CLI comes with it.
 
 ## 2. Download & install
 
+### Quickest — one command
+
+From a clone, `install.sh` inspects your machine and installs the best local
+way, then verifies it:
+
+```bash
+git clone <this-repo> hermes-swarm && cd hermes-swarm
+bash install.sh
+```
+
+It adapts to your situation: **no Hermes yet** → it runs `hermes setup` for you;
+**already have `~/.hermes`** → it adopts your provider + keys and skips setup;
+**`SWARM_LLM_BASE_URL` set** → it uses your proxy and skips setup. Re-running is
+safe. Then `hermes-swarm init && hermes-swarm up`. Prefer Docker or a manual
+install? Read on.
+
 ### Option A — Docker (recommended)
 
 The image bundles Python, Hermes, Chromium, and the dashboard, and runs the

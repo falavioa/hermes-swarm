@@ -33,6 +33,32 @@ and the `hermes` CLI ships with it (see [Already have Hermes?](#already-have-her
 
 ---
 
+## Quickest — one command
+
+From a clone, `install.sh` checks your machine (Python 3.11+, a browser, an
+existing Hermes/proxy), installs into a local `.venv`, gets a provider
+configured, and verifies with `hermes-swarm doctor`:
+
+```bash
+git clone <this-repo> hermes-swarm && cd hermes-swarm
+bash install.sh
+```
+
+It picks the right path for **your** situation automatically:
+
+| Your situation | What the script does |
+|---|---|
+| **No Hermes yet** | installs, then launches `hermes setup` — pick from 40+ providers |
+| **Already have `~/.hermes`** | adopts your provider + keys, **skips** setup |
+| **`SWARM_LLM_BASE_URL` set** | uses your LiteLLM/OpenAI-compatible proxy, **skips** setup |
+
+Flags: `--no-setup` (don't run the wizard), `--no-browser` (skip Chromium),
+`--yes` (non-interactive). Re-running is safe. Then: `hermes-swarm init && hermes-swarm up`.
+
+Prefer containers or installing by hand? Use the options below.
+
+---
+
 ## Option A — Docker (recommended)
 
 ```bash
@@ -67,7 +93,7 @@ playwright install chromium         # for the browser-publishing tools
 
 hermes setup                        # pick provider + key + model (saved in ~/.hermes)
 
-hermes-swarm doctor                 # confirm Hermes + your model + Chromium
+hermes-swarm doctor                 # confirm Hermes (+ version), your model, Chromium, compat seams
 hermes-swarm init                   # scaffold a starter team + coordinator agent
 hermes-swarm up                     # serve the dashboard on http://127.0.0.1:8000
 ```
