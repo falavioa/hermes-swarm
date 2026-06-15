@@ -11,7 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from collections import deque
 
@@ -290,6 +290,82 @@ def _set_terminal_cwd_override(path: Any) -> None:
 
 def _reset_terminal_cwd_override() -> None:
     _terminal_cwd_tls.value = None
+
+
+def _inject_swarm_tools(agent, *, is_supervisor: bool,
+                        disabled: Optional[Set[str]] = None) -> Set[str]:
+    """Expose the swarm's coordination/util tools on a freshly-built AIAgent.
+
+    This is the ONE place that mutates ``agent.tools`` / ``agent.valid_tool_names``
+    (Hermes internals the swarm reaches into) — kept a pure function of the agent +
+    role so that surface is both guardable (one spot to fix on a Hermes change) and
+    unit-testable without building a real agent. Returns the set of names added.
+
+    Role split: ``send_peer_message`` is REQUIRED for everyone (turn-ending relies
+    on it) and never disabled; workers also get file/credentials/GUI-browser tools;
+    supervisors get the pause/resume brake. Any tool already present, or disabled
+    per-agent (dashboard picker / disabled_toolsets), is skipped.
+    """
+    from swarm_server.tools import (
+        _SEND_PEER_MESSAGE_TOOL_SCHEMA, _ASK_HUMAN_TOOL_SCHEMA,
+        _REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA, _LOG_DECISION_TOOL_SCHEMA,
+        _RECALL_DECISIONS_TOOL_SCHEMA, _LOG_ACTION_TOOL_SCHEMA,
+        _CLOSE_LEDGER_ENTRY_TOOL_SCHEMA, _READ_FILES_TOOL_SCHEMA,
+        _GET_SELF_CONFIG_TOOL_SCHEMA, _REQUEST_CONFIG_CHANGE_TOOL_SCHEMA,
+        _SCHEDULE_WAKEUP_TOOL_SCHEMA, _CANCEL_WAKEUP_TOOL_SCHEMA,
+        _PAUSE_AGENT_TOOL_SCHEMA, _RESUME_AGENT_TOOL_SCHEMA,
+    )
+
+    disabled = disabled or set()
+    existing = {t.get("function", {}).get("name") for t in (agent.tools or [])}
+    added: Set[str] = set()
+
+    def add(schema, *, required: bool = False) -> None:
+        name = schema["function"]["name"]
+        if name in existing or (not required and name in disabled):
+            return
+        agent.tools = list(agent.tools or [])
+        agent.tools.append(schema)
+        agent.valid_tool_names.add(name)
+        existing.add(name)
+        added.add(name)
+
+    # Always-on coordination + util (workers AND supervisors).
+    add(_SEND_PEER_MESSAGE_TOOL_SCHEMA, required=True)  # never disabled
+    add(_ASK_HUMAN_TOOL_SCHEMA)
+    add(_REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA)             # human browser handoff
+    add(_LOG_DECISION_TOOL_SCHEMA)                       # strategy memory
+    add(_RECALL_DECISIONS_TOOL_SCHEMA)
+    add(_LOG_ACTION_TOOL_SCHEMA)
+    add(_CLOSE_LEDGER_ENTRY_TOOL_SCHEMA)                 # ledger hygiene
+    add(_GET_SELF_CONFIG_TOOL_SCHEMA)                    # self-awareness (propose-only)
+    add(_REQUEST_CONFIG_CHANGE_TOOL_SCHEMA)
+    add(_SCHEDULE_WAKEUP_TOOL_SCHEMA)                    # cron self-scheduling
+    add(_CANCEL_WAKEUP_TOOL_SCHEMA)
+
+    if not is_supervisor:
+        # Batch file reads (one call for 2-8 files vs N context-rebilling round trips).
+        add(_READ_FILES_TOOL_SCHEMA)
+    else:
+        # Emergency brake — SUPERVISORS ONLY: freeze/lift a peer mid-turn.
+        add(_PAUSE_AGENT_TOOL_SCHEMA)
+        add(_RESUME_AGENT_TOOL_SCHEMA)
+
+    if not is_supervisor:
+        # Per-team credential registry (workers authenticate; supervisors don't).
+        from swarm_server.credentials import (
+            GET_CREDENTIAL_TOOL_SCHEMA, LIST_CREDENTIALS_TOOL_SCHEMA,
+        )
+        add(GET_CREDENTIAL_TOOL_SCHEMA)
+        add(LIST_CREDENTIALS_TOOL_SCHEMA)
+        # GUI-grade browser tools, only where Hermes' own browser toolset is live
+        # (browser_navigate present) — they drive the same session.
+        if "browser_navigate" in existing:
+            from swarm_server.browser_gui_tools import GUI_BROWSER_TOOL_SCHEMAS
+            for _gui_schema in GUI_BROWSER_TOOL_SCHEMAS:
+                add(_gui_schema)
+
+    return added
 
 
 class AgentDaemon:
@@ -754,6 +830,9 @@ class AgentDaemon:
 
                 if _eff_provider:
                     extra_kwargs["provider"] = _eff_provider
+                # Live progress callbacks go in via the constructor (public API),
+                # not post-construction attribute writes.
+                extra_kwargs.update(self._live_callback_kwargs())
                 self._ai_agent = AIAgent(
                     base_url=_eff_base,
                     api_key=_eff_key,
@@ -766,152 +845,20 @@ class AgentDaemon:
                     session_db=agent_session_db,
                     **extra_kwargs,
                 )
-                self._wire_live_callbacks()
                 _register_custom_tools()
 
-                existing_names = {
-                    t.get("function", {}).get("name") for t in (self._ai_agent.tools or [])
-                }
-                # Optional swarm tools can be turned off per agent via
-                # disabled_toolsets (the dashboard picker lists them). send_peer_message
-                # is REQUIRED (turn-ending relies on it) and is never disabled.
-                # Reuse the normalized list (dis_ts) so a comma-string config form
-                # isn't turned into a set of individual characters by set("a,b").
-                disabled = set(dis_ts or [])
-                if "send_peer_message" not in existing_names:
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_SEND_PEER_MESSAGE_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("send_peer_message")
-                if "ask_human" not in existing_names and "ask_human" not in disabled:
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_ASK_HUMAN_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("ask_human")
-                # Browser handoff: agent hands the live browser to a human for a
-                # login / CAPTCHA / verification step, then resumes (see tools.py).
-                if "request_human_takeover" not in existing_names and "request_human_takeover" not in disabled:
-                    from swarm_server.tools import _REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_REQUEST_HUMAN_TAKEOVER_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("request_human_takeover")
-                if "log_decision" not in existing_names and "log_decision" not in disabled:
-                    from swarm_server.tools import _LOG_DECISION_TOOL_SCHEMA
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_LOG_DECISION_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("log_decision")
-                # Strategy memory: search the team's past decisions on demand to
-                # review what's been tried and pivot (complements the 20-decision
-                # window auto-injected each turn).
-                if "recall_decisions" not in existing_names and "recall_decisions" not in disabled:
-                    from swarm_server.tools import _RECALL_DECISIONS_TOOL_SCHEMA
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_RECALL_DECISIONS_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("recall_decisions")
-                if "log_action" not in existing_names and "log_action" not in disabled:
-                    from swarm_server.tools import _LOG_ACTION_TOOL_SCHEMA
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_LOG_ACTION_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("log_action")
-                # Ledger hygiene: dismiss orphaned OPEN delegations (work that
-                # completed via a different chain, so no RESULT will ever close
-                # them). All agents — delegators close their own orphans,
-                # supervisors close any.
-                if ("close_ledger_entry" not in existing_names
-                        and "close_ledger_entry" not in disabled):
-                    from swarm_server.tools import _CLOSE_LEDGER_ENTRY_TOOL_SCHEMA
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_CLOSE_LEDGER_ENTRY_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("close_ledger_entry")
-                # Batch file reads: one call for 2-8 files instead of N single
-                # read_file round trips (each round trip re-bills the whole
-                # context — measured zero model-side batching, so the batching
-                # has to live in the tool). Not for supervisors (no file work).
-                if (not self.cfg.get("is_supervisor")
-                        and "read_files" not in existing_names
-                        and "read_files" not in disabled):
-                    from swarm_server.tools import _READ_FILES_TOOL_SCHEMA
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_READ_FILES_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("read_files")
-                # Self-awareness: read own config/telemetry + PROPOSE changes
-                # (human approves in the UI — agents cannot self-apply).
-                from swarm_server.tools import (
-                    _GET_SELF_CONFIG_TOOL_SCHEMA,
-                    _REQUEST_CONFIG_CHANGE_TOOL_SCHEMA,
+                # Expose the swarm's coordination/util tools on the freshly-built
+                # agent (per-agent, role-aware). Pure module-level function so the
+                # one Hermes-internal mutation site stays guardable + unit-testable.
+                _inject_swarm_tools(
+                    self._ai_agent,
+                    is_supervisor=bool(self.cfg.get("is_supervisor")),
+                    disabled=set(dis_ts or []),
                 )
-                if "get_self_config" not in existing_names and "get_self_config" not in disabled:
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_GET_SELF_CONFIG_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("get_self_config")
-                if "request_config_change" not in existing_names and "request_config_change" not in disabled:
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_REQUEST_CONFIG_CHANGE_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("request_config_change")
-                # Cron self-scheduling: agents create/cancel their own recurring
-                # wake-ups (managed + visible in the dashboard). Registered in the
-                # Hermes registry above; exposed to the LLM here like the others.
-                from swarm_server.tools import (
-                    _SCHEDULE_WAKEUP_TOOL_SCHEMA,
-                    _CANCEL_WAKEUP_TOOL_SCHEMA,
-                )
-                if "schedule_wakeup" not in existing_names and "schedule_wakeup" not in disabled:
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_SCHEDULE_WAKEUP_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("schedule_wakeup")
-                if "cancel_wakeup" not in existing_names and "cancel_wakeup" not in disabled:
-                    self._ai_agent.tools = list(self._ai_agent.tools or [])
-                    self._ai_agent.tools.append(_CANCEL_WAKEUP_TOOL_SCHEMA)
-                    self._ai_agent.valid_tool_names.add("cancel_wakeup")
-                # Emergency brake — SUPERVISORS ONLY. pause_agent/resume_agent let
-                # the overseer freeze a peer mid-turn (e.g. about to damage prod)
-                # and lift it once safe. Never exposed to non-supervisors.
-                if self.cfg.get("is_supervisor"):
-                    from swarm_server.tools import (
-                        _PAUSE_AGENT_TOOL_SCHEMA,
-                        _RESUME_AGENT_TOOL_SCHEMA,
-                    )
-                    if "pause_agent" not in existing_names and "pause_agent" not in disabled:
-                        self._ai_agent.tools = list(self._ai_agent.tools or [])
-                        self._ai_agent.tools.append(_PAUSE_AGENT_TOOL_SCHEMA)
-                        self._ai_agent.valid_tool_names.add("pause_agent")
-                    if "resume_agent" not in existing_names and "resume_agent" not in disabled:
-                        self._ai_agent.tools = list(self._ai_agent.tools or [])
-                        self._ai_agent.tools.append(_RESUME_AGENT_TOOL_SCHEMA)
-                        self._ai_agent.valid_tool_names.add("resume_agent")
 
-                # Credentials registry: fetch/list per-team secrets by site key
-                # with an explicit purpose, instead of secrets riding inline in
-                # workspace.md prompts. Not for supervisors (they do no project
-                # work and never authenticate anywhere).
-                if not self.cfg.get("is_supervisor"):
-                    from swarm_server.credentials import (
-                        GET_CREDENTIAL_TOOL_SCHEMA,
-                        LIST_CREDENTIALS_TOOL_SCHEMA,
-                    )
-                    for _cred_schema in (GET_CREDENTIAL_TOOL_SCHEMA,
-                                         LIST_CREDENTIALS_TOOL_SCHEMA):
-                        _cred_name = _cred_schema["function"]["name"]
-                        if _cred_name not in existing_names and _cred_name not in disabled:
-                            self._ai_agent.tools = list(self._ai_agent.tools or [])
-                            self._ai_agent.tools.append(_cred_schema)
-                            self._ai_agent.valid_tool_names.add(_cred_name)
-
-                # GUI-grade browser tools (keys/hover/drag/click_xy/screenshot/
-                # locate). Only where the Hermes browser toolset itself is live
-                # (browser_navigate present) — they drive the same session — and
-                # NEVER for supervisors, whose browser access is stripped.
-                if (not self.cfg.get("is_supervisor")
-                        and "browser_navigate" in existing_names):
-                    from swarm_server.browser_gui_tools import GUI_BROWSER_TOOL_SCHEMAS
-                    for _gui_schema in GUI_BROWSER_TOOL_SCHEMAS:
-                        _gui_name = _gui_schema["function"]["name"]
-                        if _gui_name not in existing_names and _gui_name not in disabled:
-                            self._ai_agent.tools = list(self._ai_agent.tools or [])
-                            self._ai_agent.tools.append(_gui_schema)
-                            self._ai_agent.valid_tool_names.add(_gui_name)
-
-                # Force tool-use enforcement guidance — agents must end their turn
-                # with a tool call (send_peer_message / ask_human) rather than
-                # silently stopping with a text response.
+                # Force tool-use enforcement — agents must end their turn with a
+                # tool call (send_peer_message / ask_human) rather than silently
+                # stopping with a text response.
                 self._ai_agent._tool_use_enforcement = True
 
                 # Eagerly init session DB while HERMES_HOME is locked to this agent
@@ -2066,18 +2013,17 @@ class AgentDaemon:
         self._telemetry = t
         return t
 
-    def _wire_live_callbacks(self) -> None:
-        """Attach Hermes' progress callbacks to the live-exec broadcaster.
+    def _live_callback_kwargs(self) -> Dict[str, Any]:
+        """Hermes progress callbacks, as AIAgent(...) constructor kwargs.
 
-        Hermes invokes these on the conversation thread as the turn unfolds:
-        thinking (status pulse), reasoning (chain-of-thought text), tool start /
-        complete, and stream_delta (final-answer tokens). We forward each as an
-        'agent_exec' WS event so the UI can render the turn as it happens.
+        Passed at construction (the sanctioned public API) rather than set as
+        attributes after the fact, so we don't depend on those attrs staying
+        post-construction-writable across Hermes versions. Hermes invokes these
+        on the conversation thread as the turn unfolds: thinking (status pulse),
+        reasoning (chain-of-thought text), tool start / complete, and
+        stream_delta (final-answer tokens). We forward each as an 'agent_exec'
+        WS event so the UI can render the turn as it happens.
         """
-        a = self._ai_agent
-        if a is None:
-            return
-
         def on_thinking(text: str = "") -> None:
             self._emit_exec("thinking", {"text": (text or "")[:200]})
 
@@ -2128,11 +2074,13 @@ class AgentDaemon:
             if chunk:
                 self._emit_exec("token", {"text": str(chunk)})
 
-        a.thinking_callback = on_thinking
-        a.reasoning_callback = on_reasoning
-        a.tool_start_callback = on_tool_start
-        a.tool_complete_callback = on_tool_complete
-        a.stream_delta_callback = on_stream_delta
+        return {
+            "thinking_callback": on_thinking,
+            "reasoning_callback": on_reasoning,
+            "tool_start_callback": on_tool_start,
+            "tool_complete_callback": on_tool_complete,
+            "stream_delta_callback": on_stream_delta,
+        }
 
     def _run_conversation_blocking(self, combined: str) -> Dict[str, Any]:
         """Synchronous body executed on this agent's dedicated worker thread.

@@ -927,6 +927,8 @@ class MasterAgent:
             extra_kwargs: Dict[str, Any] = {"enabled_toolsets": ["swarm_master", "web"]}
             if eff.get("provider"):
                 extra_kwargs["provider"] = eff["provider"]
+            # Progress callbacks via the constructor (public API), not attr writes.
+            extra_kwargs.update(self._callback_kwargs())
 
             self._ai_agent = AIAgent(
                 base_url=eff["base_url"] or None,
@@ -962,8 +964,6 @@ class MasterAgent:
                 install_crawl4ai_web_tools(_hermes_registry)
             except Exception as _e:  # noqa: BLE001
                 log.warning("[master] web fallback install skipped: %s", _e)
-
-            self._wire_callbacks()
             log.info("[master] agent ready (model=%s)", model)
 
     def _write_soul_md(self, content: str) -> None:
@@ -988,11 +988,9 @@ class MasterAgent:
                 a.tools.append(schema)
                 a.valid_tool_names.add(name)
 
-    def _wire_callbacks(self) -> None:
-        a = self._ai_agent
-        if a is None:
-            return
-
+    def _callback_kwargs(self) -> Dict[str, Any]:
+        """Architect progress callbacks, as AIAgent(...) constructor kwargs
+        (passed at construction rather than set as attributes afterward)."""
         def on_tool_start(tool_call_id, name, targs):  # noqa: ANN001
             _broadcast("master_exec", {"kind": "tool_start", "name": str(name), "timestamp": time.time()})
 
@@ -1003,15 +1001,11 @@ class MasterAgent:
             if text:
                 _broadcast("master_exec", {"kind": "thinking", "text": str(text)[:160], "timestamp": time.time()})
 
-        for attr, cb in (
-            ("tool_start_callback", on_tool_start),
-            ("tool_complete_callback", on_tool_complete),
-            ("thinking_callback", on_thinking),
-        ):
-            try:
-                setattr(a, attr, cb)
-            except Exception:  # noqa: BLE001
-                pass
+        return {
+            "tool_start_callback": on_tool_start,
+            "tool_complete_callback": on_tool_complete,
+            "thinking_callback": on_thinking,
+        }
 
     def _load_history(self) -> List[Dict[str, Any]]:
         if self._ai_agent is None:
