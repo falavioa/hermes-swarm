@@ -1228,14 +1228,17 @@ def _caller_from_kwargs(kwargs: dict) -> str:
 
 def _get_self_config_handler(args: dict, **kwargs) -> str:
     caller = _caller_from_kwargs(kwargs)
-    from swarm_server.config import load_agents_config, DEFAULT_MODEL
+    from swarm_server.config import load_agents_config
+    from swarm_server.model_config import resolve_model
 
     cfg = load_agents_config()
     a = cfg["agents"].get(caller)
     if a is None:
         return json.dumps({"success": False, "error": f"Agent '{caller}' not found."})
     editable = {k: a.get(k) for k in SELF_CONFIG_ALLOWED_KEYS}
-    editable["model"] = editable.get("model") or DEFAULT_MODEL
+    # Show the effective model: explicit per-agent override, else the resolved
+    # default (swarm default / ~/.hermes), else empty (unconfigured).
+    editable["model"] = editable.get("model") or resolve_model(a).get("model") or ""
     daemon = _daemon_registry.get(caller)
     telemetry = dict(getattr(daemon, "_telemetry", {}) or {}) if daemon else {}
     crons = daemon.crons_runtime() if daemon else list(a.get("crons") or [])

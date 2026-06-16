@@ -62,7 +62,10 @@ def test_config():
 
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
-        write_agent_hermes_config(home)
+        # Custom / OpenAI-compatible endpoint route: the swarm pins the window +
+        # aux because the real model is hidden behind the base_url.
+        write_agent_hermes_config(home, provider="custom",
+                                  base_url="https://api.example.com/v1")
         cfg = yaml.safe_load((home / "config.yaml").read_text())
 
         check("config.yaml written", (home / "config.yaml").exists())
@@ -83,7 +86,8 @@ def test_config():
               f"{AGENT_CONTEXT_WINDOW} < {MINIMUM_CONTEXT_LENGTH}")
 
         # A merge-safe second write must not duplicate/clobber the section.
-        write_agent_hermes_config(home)
+        write_agent_hermes_config(home, provider="custom",
+                                  base_url="https://api.example.com/v1")
         cfg2 = yaml.safe_load((home / "config.yaml").read_text())
         check("re-write is idempotent", cfg2["compression"] == cfg["compression"])
 

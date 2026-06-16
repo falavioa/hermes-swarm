@@ -15,23 +15,11 @@ services:
     volumes:
       - swarm-data:/data
     restart: unless-stopped
-    # If your LLM endpoint runs on the host (e.g. a LiteLLM proxy on :4000),
-    # reach it from the container via http://host.docker.internal:4000/v1
+    # If you configured a custom / OpenAI-compatible endpoint that runs on the
+    # HOST (via `hermes setup`), reach it from the container as
+    # http://host.docker.internal:<port> instead of localhost.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-  # ---- Optional: run a local LiteLLM proxy alongside the swarm ----
-  # Uncomment and provide a litellm config to route many providers behind one
-  # OpenAI-compatible endpoint, then set SWARM_LLM_BASE_URL=http://litellm:4000/v1
-  # litellm:
-  #   image: ghcr.io/berriai/litellm:main-latest
-  #   command: ["--config", "/app/litellm.config.yaml", "--port", "4000"]
-  #   volumes:
-  #     - ./litellm.config.yaml:/app/litellm.config.yaml:ro
-  #   env_file: .env
-  #   ports:
-  #     - "127.0.0.1:4000:4000"
-  #   restart: unless-stopped
 
 volumes:
   swarm-data:

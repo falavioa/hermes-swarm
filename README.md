@@ -23,9 +23,10 @@ and steer the whole team from one web UI.
    own one-command wizard that lets you pick from 40+ providers (Anthropic,
    OpenAI, OpenRouter, Groq, DeepSeek, a local model, …), paste your key, and
    choose a model. The swarm reads that config directly; there's nothing
-   provider-specific to set up separately. *(Already point at a
-   [LiteLLM](https://github.com/BerriAI/litellm)/OpenAI-compatible proxy? You can
-   instead set `SWARM_LLM_*` — see [Configuration](#configuration-environment-variables).)*
+   provider-specific to set up separately. *(Using a
+   [LiteLLM](https://github.com/BerriAI/litellm) proxy or any OpenAI-compatible
+   endpoint? It's just another provider — pick **custom** in `hermes setup` and
+   enter its base URL + key. No swarm-specific config.)*
 2. **Docker** *(option A)* **or Python 3.11+** *(option B)*.
 
 You do **not** need to install Hermes separately — it comes in automatically,
@@ -33,73 +34,43 @@ and the `hermes` CLI ships with it (see [Already have Hermes?](#already-have-her
 
 ---
 
-## Quickest — one command
+## Install
 
-From a clone, `install.sh` checks your machine (Python 3.11+, a browser, an
-existing Hermes/proxy), installs into a local `.venv`, gets a provider
-configured, and verifies with `hermes-swarm doctor`:
+Each path ends with the dashboard on **http://127.0.0.1:8000**.
+
+### One line — macOS & Linux
 
 ```bash
-git clone <this-repo> hermes-swarm && cd hermes-swarm
-bash install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/CyberTron957/logios-orchestrator/main/install.sh)
 ```
 
-It picks the right path for **your** situation automatically:
+That clones the repo, sets up a local `.venv`, installs everything, fetches a
+browser, runs `hermes setup` (40+ providers, incl. a custom / OpenAI-compatible
+endpoint), scaffolds a starter team, verifies with `hermes-swarm doctor`, and
+offers to start the dashboard. Already have `~/.hermes`? It adopts your provider
++ keys and skips setup. Safe to re-run. *(Flags after the URL, e.g.
+`… ) --no-run`; or `curl -fsSL … | bash`, which installs then prints the
+commands to configure + start.)*
 
-| Your situation | What the script does |
-|---|---|
-| **No Hermes yet** | installs, then launches `hermes setup` — pick from 40+ providers |
-| **Already have `~/.hermes`** | adopts your provider + keys, **skips** setup |
-| **`SWARM_LLM_BASE_URL` set** | uses your LiteLLM/OpenAI-compatible proxy, **skips** setup |
+**Windows:** run that line in [WSL](https://learn.microsoft.com/windows/wsl/),
+or use Docker below.
 
-Flags: `--no-setup` (don't run the wizard), `--no-browser` (skip Chromium),
-`--yes` (non-interactive). Re-running is safe. Then: `hermes-swarm init && hermes-swarm up`.
+**Already cloned the repo?** `bash install.sh` from inside it does the same thing.
 
-Prefer containers or installing by hand? Use the options below.
-
----
-
-## Option A — Docker (recommended)
+### Docker
 
 ```bash
 git clone <this-repo> hermes-swarm && cd hermes-swarm
-cp .env.example .env          # optional — only for the proxy path (see below)
+docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup
 docker compose up --build
 ```
 
-Open **http://127.0.0.1:8000**. The image bundles Python, Hermes, Chromium, and
-the dashboard; your data persists in the `swarm-data` volume.
-
-**Configure your provider** with Hermes' own wizard, written to the swarm's
-shared config on the volume (so it survives restarts and becomes the default):
-
-```bash
-docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup
-```
-
-> Prefer an OpenAI-compatible / LiteLLM proxy (e.g. one running on your **host**)?
-> Skip `hermes setup` and instead set `SWARM_LLM_BASE_URL` (e.g.
-> `http://host.docker.internal:4000/v1`) + `SWARM_LLM_API_KEY` + `SWARM_DEFAULT_MODEL`
-> in `.env`.
-
----
-
-## Option B — pip
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate   # Python 3.11+
-pip install .                       # pulls hermes-agent (+ the `hermes` CLI) + deps
-playwright install chromium         # for the browser-publishing tools
-
-hermes setup                        # pick provider + key + model (saved in ~/.hermes)
-
-hermes-swarm doctor                 # confirm Hermes (+ version), your model, Chromium, compat seams
-hermes-swarm init                   # scaffold a starter team + coordinator agent
-hermes-swarm up                     # serve the dashboard on http://127.0.0.1:8000
-```
-
-That's it — `hermes setup` is the only place you enter a provider or key. The
-swarm picks up whatever you configured there.
+The middle step picks your provider (written to the volume's shared config); the
+image bundles Python, Hermes, Chromium, and the dashboard, with data persisted in
+the `swarm-data` volume. Using a LiteLLM proxy or other OpenAI-compatible
+endpoint? Pick **custom** in `hermes setup` and enter its base URL + key (for one
+on your host, use `http://host.docker.internal:<port>`). To require an API key
+before exposing the port, `cp .env.example .env` and set `SWARM_API_KEY`.
 
 ---
 
@@ -123,26 +94,23 @@ If you already use Hermes (`~/.hermes/`), there's nothing extra to do:
   dashboard writes to the swarm's *own* shared config (`<data>/.hermes-shared`),
   not `~/.hermes`.
 
-Precedence is: per-agent override → swarm default → your `~/.hermes` → proxy. Run
+Precedence is: per-agent override → swarm default → your `~/.hermes`. Run
 `hermes-swarm doctor` to see exactly which one is in effect.
 
 ---
 
 ## Configuration (environment variables)
 
-> **Provider & model are configured with `hermes setup`, not env vars.** The
-> `SWARM_LLM_*` variables below are a fully **opt-in** alternative for pointing
-> the whole swarm at a single OpenAI-compatible / LiteLLM proxy — there is **no
-> implicit proxy**. Leave them unset and the swarm reads your Hermes config; set
-> `SWARM_LLM_BASE_URL` and the swarm routes every agent through that endpoint
-> instead. Per-agent overrides (any provider/model) are set live from the dashboard.
+> **Provider & model are configured with `hermes setup`, not env vars** — that
+> includes custom / OpenAI-compatible endpoints (pick the **custom** provider).
+> The swarm has no proxy of its own. Per-agent overrides (any provider/model) are
+> set live from the dashboard.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SWARM_LLM_BASE_URL` | *(unset — proxy off)* | opt-in: OpenAI-compatible / LiteLLM endpoint for the whole swarm. Setting this enables the proxy path |
-| `SWARM_LLM_API_KEY` | `sk-1234` | key for that proxy endpoint (only used when `SWARM_LLM_BASE_URL` is set) |
-| `SWARM_DEFAULT_MODEL` | `litellm-model` | default model name when using the proxy path |
-| `SWARM_FALLBACK_MODELS` | `litellm-model,kimi` | dropdown list if the backend can't be queried |
+| `SWARM_DEFAULT_MODEL` | *(unset)* | optional: force a default model name without the wizard |
+| `SWARM_FALLBACK_MODELS` | *(unset)* | optional: model-dropdown list when the backend exposes no `/models` |
+| `SWARM_VISION_MODEL` | *(unset)* | optional: separate multimodal model, only for a text-only custom endpoint |
 | `SWARM_HOST` / `SWARM_PORT` | `127.0.0.1` / `8000` | dashboard bind address |
 | `SWARM_API_KEY` | *(unset)* | if set, required on **every** endpoint + WebSocket — the dashboard prompts for it once and remembers it. **Set it whenever you expose the port.** |
 | `SWARM_DATA_DIR` | repo `./data` or `~/.hermes-swarm/data` | writable state (configs, queues, workspaces) |

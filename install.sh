@@ -3,12 +3,18 @@
 # Hermes Swarm — one-command installer.
 #
 # Checks your machine, installs the swarm the best local way, and gets a
-# provider configured — adopting an existing Hermes (~/.hermes) or a LiteLLM/
-# OpenAI-compatible proxy if you already have one, otherwise launching
-# `hermes setup`. Idempotent: safe to re-run.
+# provider configured — adopting an existing Hermes (~/.hermes) if you have one,
+# otherwise launching `hermes setup` (which also covers custom / OpenAI-compatible
+# endpoints). Idempotent: safe to re-run.
+#
+# Works two ways:
+#   • from a clone:   bash install.sh
+#   • from the web:   bash <(curl -fsSL <raw-url>/install.sh)     # clones first
+# When run from the web it clones into ./hermes-swarm (override: HERMES_SWARM_DIR).
 #
 # Usage:
-#   bash install.sh [--no-setup] [--no-browser] [--yes]
+#   bash install.sh [--no-run] [--no-setup] [--no-browser] [--yes]
+#     --no-run      install only; don't offer to start the dashboard at the end
 #     --no-setup    don't launch `hermes setup` even if no provider is found
 #     --no-browser  skip the Chromium download (browser tools won't work)
 #     --yes, -y     non-interactive: never prompt (also skips the setup wizard)
@@ -18,7 +24,7 @@
 #
 set -euo pipefail
 
-usage() { sed -n '2,18p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'; }
 
 # ---- pretty output --------------------------------------------------------
 if [ -t 1 ]; then B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'; else B= G= Y= R= X=; fi
@@ -27,8 +33,9 @@ info() { printf '    %s\n' "$1"; }
 warn() { printf '%s !! %s%s\n' "$Y" "$1" "$X"; }
 die()  { printf '%s xx %s%s\n' "$R" "$1" "$X" >&2; exit 1; }
 
-NO_SETUP=0; NO_BROWSER=0; ASSUME_YES=0
+NO_RUN=0; NO_SETUP=0; NO_BROWSER=0; ASSUME_YES=0
 for a in "$@"; do case "$a" in
+  --no-run)     NO_RUN=1 ;;
   --no-setup)   NO_SETUP=1 ;;
   --no-browser) NO_BROWSER=1 ;;
   --yes|-y)     ASSUME_YES=1 ;;
@@ -36,7 +43,30 @@ for a in "$@"; do case "$a" in
   *)            die "unknown option: $a  (try --help)" ;;
 esac; done
 
-cd "$(dirname "$0")"   # operate from the repo root (where this script lives)
+# ---- Locate or fetch the repo --------------------------------------------
+# Run from a checkout → use it. Piped from the web (no checkout) → clone first,
+# then continue from inside the clone.
+REPO_URL="${HERMES_SWARM_REPO:-https://github.com/CyberTron957/logios-orchestrator.git}"
+_in_repo() { [ -f "$1/pyproject.toml" ] && grep -q 'name *= *"hermes-swarm"' "$1/pyproject.toml" 2>/dev/null; }
+
+_self_dir=""
+case "$0" in */*) _self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" ;; esac
+if [ -n "$_self_dir" ] && _in_repo "$_self_dir"; then
+  cd "$_self_dir"                                  # bash install.sh from a clone
+elif _in_repo "$PWD"; then
+  :                                                # already inside a checkout
+else
+  command -v git >/dev/null 2>&1 || die "git is required to fetch hermes-swarm — install it and retry."
+  TARGET="${HERMES_SWARM_DIR:-$PWD/hermes-swarm}"
+  if _in_repo "$TARGET"; then
+    step "Updating existing clone at $TARGET"
+    git -C "$TARGET" pull --ff-only 2>/dev/null || warn "couldn't fast-forward; using the existing clone."
+  else
+    step "Fetching hermes-swarm → $TARGET"
+    git clone --depth 1 "$REPO_URL" "$TARGET" || die "git clone failed ($REPO_URL)."
+  fi
+  cd "$TARGET"
+fi
 
 # ---- 1. OS + Python 3.11+ -------------------------------------------------
 step "Checking prerequisites"
@@ -97,9 +127,7 @@ fi
 # ---- 5. provider / model (adopt existing, else set up) -------------------
 step "Provider / model"
 is_configured() { "$PY" -c 'import sys; from swarm_server.model_config import is_model_configured; sys.exit(0 if is_model_configured() else 1)' 2>/dev/null; }
-if [ -n "${SWARM_LLM_BASE_URL:-}" ]; then
-  info "SWARM_LLM_BASE_URL is set → using your OpenAI-compatible / LiteLLM proxy. Skipping hermes setup."
-elif is_configured; then
+if is_configured; then
   info "A provider is already configured (your ~/.hermes or a swarm default) — adopting it. Nothing to do."
 elif [ "$NO_SETUP" -eq 1 ] || [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
   warn "No provider configured. Run it yourself when ready:  $VENV/bin/hermes setup"
@@ -110,11 +138,22 @@ fi
 
 # ---- 6. verify ------------------------------------------------------------
 step "Verifying (hermes-swarm doctor)"
-"$VENV/bin/hermes-swarm" doctor || warn "doctor flagged issues above — resolve them before 'hermes-swarm up'."
+"$VENV/bin/hermes-swarm" doctor || warn "doctor flagged issues above — resolve them before starting."
 
-# ---- done -----------------------------------------------------------------
-REL_VENV="${VENV#"$PWD"/}"
-step "Done"
-printf '    %sActivate:%s  source %s/bin/activate\n' "$B" "$X" "$REL_VENV"
-printf '    %sScaffold:%s  hermes-swarm init        %s# starter team + coordinator%s\n' "$B" "$X" "$Y" "$X"
-printf '    %sRun:     %s  hermes-swarm up          %s# dashboard → http://127.0.0.1:8000%s\n' "$B" "$X" "$Y" "$X"
+# ---- 7. scaffold a starter team (no-op-safe) ------------------------------
+step "Scaffolding a starter team"
+"$VENV/bin/hermes-swarm" init || warn "init skipped (see above)."
+
+# ---- done: start now, or print the one command to do it -------------------
+# Absolute path so it works from any shell (e.g. after a web-bootstrap clone).
+START_CMD="$VENV/bin/hermes-swarm up"
+step "Done — your swarm is installed in $PWD"
+info "Start the dashboard:  $START_CMD   → http://127.0.0.1:8000"
+if [ "$NO_RUN" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
+  printf '\n    Start it now? [Y/n] '
+  read -r _ans
+  case "${_ans:-y}" in
+    [Nn]*) info "Not started — run the command above when you're ready." ;;
+    *)     step "Starting (Ctrl-C to stop)"; exec "$VENV/bin/hermes-swarm" up ;;
+  esac
+fi

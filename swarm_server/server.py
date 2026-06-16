@@ -19,8 +19,7 @@ from swarm_server.config import (
     DASHBOARD_DIR,
     DEFAULT_MODEL,
     DIGEST_SWEEP_INTERVAL_SECONDS,
-    LITELLM_API_BASE,
-    list_proxy_models,
+    list_backend_models,
     list_toolsets,
     MONITORING_DB,
     MONITORING_MAX_EVENTS,
@@ -208,7 +207,14 @@ async def lifespan(app: FastAPI):
     prune_task = loop.create_task(_periodic_monitoring_prune())
     digest_task = loop.create_task(_periodic_digest())
     loopdet_task = loop.create_task(_periodic_loop_detector())
-    log.info("[Startup] All agents running. LiteLLM at %s", LITELLM_API_BASE)
+    try:
+        from swarm_server.model_config import resolve_model
+
+        _eff = resolve_model({})
+        log.info("[Startup] All agents running. Model: %s (source: %s)",
+                 _eff.get("model") or "none — run `hermes setup`", _eff.get("source"))
+    except Exception:
+        log.info("[Startup] All agents running.")
     log.info("[Startup] Dashboard at http://%s:%s/", SERVER_HOST, SERVER_PORT)
 
     try:
@@ -1240,7 +1246,7 @@ async def get_models():
     from swarm_server.model_config import resolve_model, get_default_model, _preset
 
     eff = resolve_model({})  # the default backend (no per-agent override)
-    served = list_proxy_models(eff.get("base_url") or None, eff.get("api_key") or None)
+    served = list_backend_models(eff.get("base_url") or None, eff.get("api_key") or None)
     # Also offer the chosen provider's known models (helps native providers like
     # Anthropic where there's no /models listing).
     preset = _preset(get_default_model().get("provider") or "")
@@ -1857,17 +1863,24 @@ _BACKEND_CHECK = {"ts": 0.0, "ok": None}
 
 
 def _backend_reachable_cached() -> Optional[bool]:
-    """Is the LLM backend reachable? Cached 60s so /health polling can't hammer
-    the proxy. None until first probed / on error."""
+    """Is the configured LLM backend reachable? Cached 60s so /health polling
+    can't hammer it. Only custom / OpenAI-compatible endpoints expose a /models
+    list to probe; for native providers this returns None (not probed)."""
     import time as _t
     import urllib.request
     if _t.time() - _BACKEND_CHECK["ts"] < 60:
         return _BACKEND_CHECK["ok"]
     _BACKEND_CHECK["ts"] = _t.time()
     try:
-        from swarm_server.config import LITELLM_API_BASE, LLM_API_KEY
-        req = urllib.request.Request(f"{LITELLM_API_BASE}/models",
-                                     headers={"Authorization": f"Bearer {LLM_API_KEY}"})
+        from swarm_server.model_config import resolve_model
+        eff = resolve_model({})
+        base_url = (eff.get("base_url") or "").strip()
+        if not base_url:
+            _BACKEND_CHECK["ok"] = None  # native provider — nothing to GET /models
+            return None
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {eff.get('api_key') or ''}"})
         with urllib.request.urlopen(req, timeout=3) as r:
             _BACKEND_CHECK["ok"] = (r.status == 200)
     except Exception:

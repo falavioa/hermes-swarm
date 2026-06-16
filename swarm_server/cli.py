@@ -23,7 +23,7 @@ def cmd_up(args) -> int:
     """Launch uvicorn serving the FastAPI app (host/port from env)."""
     import uvicorn
 
-    from swarm_server.config import SERVER_HOST, SERVER_PORT, LITELLM_API_BASE
+    from swarm_server.config import SERVER_HOST, SERVER_PORT
 
     log = logging.getLogger("swarm")
     log.info("=" * 60)
@@ -37,9 +37,8 @@ def cmd_up(args) -> int:
             log.info("  Model:        %s  (provider %s)", eff.get("model"),
                      eff.get("display_provider") or eff.get("provider"))
         else:
-            log.warning("  Model:        none configured — run `hermes setup` (or set SWARM_LLM_*)")
+            log.warning("  Model:        none configured — run `hermes setup`")
     except Exception as e:  # never let a config probe block server start
-        log.info("  LLM backend:  %s", LITELLM_API_BASE)
         log.debug("startup model resolve failed: %s", e)
     log.info("=" * 60)
     uvicorn.run(
@@ -57,7 +56,7 @@ def cmd_doctor(args) -> int:
     ok = True
 
     # 1) Hermes importable
-    from swarm_server.config import ensure_hermes_importable, LLM_API_KEY
+    from swarm_server.config import ensure_hermes_importable
 
     ensure_hermes_importable()
     try:
@@ -80,26 +79,26 @@ def cmd_doctor(args) -> int:
         ok = False
         print("✗ No model configured.")
         print("   → run `hermes setup`   (pick a provider + key + model — Hermes saves it in ~/.hermes)")
-        print("   → or set SWARM_LLM_BASE_URL + SWARM_LLM_API_KEY for an OpenAI-compatible / LiteLLM proxy")
+        print("     For a custom / OpenAI-compatible endpoint (e.g. a LiteLLM proxy), choose the")
+        print("     'custom' provider in `hermes setup` and enter its base URL + key.")
     else:
         eff = resolve_model()
         prov = eff.get("display_provider") or eff.get("provider") or "?"
         srclabel = {
             "default": "swarm default",
             "hermes": "hermes setup (~/.hermes)",
-            "proxy": "LiteLLM proxy (SWARM_LLM_*)",
         }.get(eff.get("source"), str(eff.get("source")))
         print(f"✓ Model: {eff.get('model')}  (provider {prov}, source: {srclabel})")
 
         base = eff.get("base_url")
         if base:
-            # OpenAI-compatible / proxy: we know the endpoint, so probe it.
+            # Custom / OpenAI-compatible endpoint: we know the URL, so probe it.
             try:
                 import urllib.request, json as _json
 
                 req = urllib.request.Request(
                     f"{base}/models",
-                    headers={"Authorization": f"Bearer {eff.get('api_key') or LLM_API_KEY}"},
+                    headers={"Authorization": f"Bearer {eff.get('api_key') or ''}"},
                 )
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))

@@ -22,9 +22,6 @@ from typing import Any, Dict, List, Optional
 
 from swarm_server.config import (
     DATA_ROOT,
-    DEFAULT_MODEL,
-    LITELLM_API_BASE,
-    LLM_API_KEY,
     ensure_hermes_importable,
 )
 
@@ -264,17 +261,17 @@ def is_model_configured() -> bool:
         return True
     if detect_global_hermes_model().get("model"):  # `hermes setup` (~/.hermes)
         return True
-    if os.environ.get("SWARM_LLM_BASE_URL"):
-        return True
     return False
 
 
 def resolve_model(agent_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Effective {provider, model, base_url, api_key, source, display_provider}.
 
-    Per-agent override (layered over) → swarm default → legacy proxy. The
-    routing provider is the native Hermes provider id, EXCEPT OpenAI-compatible
-    providers (OpenRouter/Custom/etc.) which route via ``custom`` + base_url.
+    Per-agent override (layered over) → swarm default → ~/.hermes. The routing
+    provider is the native Hermes provider id, EXCEPT OpenAI-compatible providers
+    (OpenRouter/Custom/etc.) which route via ``custom`` + base_url. A custom /
+    OpenAI-compatible endpoint is configured the same way as any provider —
+    through `hermes setup` (or the dashboard) — not via swarm-specific env vars.
     """
     agent_cfg = agent_cfg or {}
     default = get_default_model()
@@ -289,14 +286,6 @@ def resolve_model(agent_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if glob.get("model"):
             base = dict(glob)
             base_source = "hermes"
-        elif os.environ.get("SWARM_LLM_BASE_URL"):
-            # Explicit opt-in ONLY: route the whole swarm through one
-            # OpenAI-compatible / LiteLLM proxy. There is NO implicit localhost
-            # proxy — without SWARM_LLM_BASE_URL the swarm is "unconfigured" and
-            # asks the operator to run `hermes setup`.
-            base = {"provider": "custom", "model": DEFAULT_MODEL,
-                    "base_url": LITELLM_API_BASE, "api_key": LLM_API_KEY}
-            base_source = "proxy"
         else:
             base = {"provider": "", "model": "", "base_url": "", "api_key": ""}
             base_source = "unconfigured"
@@ -340,11 +329,9 @@ def resolve_model(agent_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     openai_compat = preset.get("openai_compatible", True) if preset else True
 
     if openai_compat:
-        # Custom path: needs a base_url. Inherit/override, else preset, else proxy.
+        # Custom path: needs a base_url — inherit/override, else the preset's.
         base_url = ov_base or base.get("base_url") or preset.get("base_url") or ""
         route_provider = "custom"
-        if not base_url and os.environ.get("SWARM_LLM_BASE_URL"):
-            base_url = LITELLM_API_BASE  # only when the proxy is explicitly enabled
     else:
         # Native provider: Hermes resolves the endpoint from its registry. Pass a
         # base_url only if one was explicitly set (don't inherit a proxy URL).
@@ -359,17 +346,17 @@ def resolve_model(agent_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Swarm-side pricing for PROXY/custom models only — USD per 1M tokens:
-# (input, output, cached_input). Hermes can't price a model hidden behind a
-# LiteLLM alias (resolve_billing_route → billing_mode "unknown"), so the
-# /teams/{id}/costs endpoint prices those token deltas with this map. NATIVE
-# providers are priced by Hermes instead (see estimate_cost_usd), so they do NOT
-# belong here. cached_input None = provider reports no cached tier (Azure-hosted
-# DeepSeek/Kimi don't prompt-cache — verified empirically). Keep in sync with the
-# proxy's model_info blocks; LiteLLM's Postgres SpendLogs remain billing truth.
+# Swarm-side pricing fallback for custom / OpenAI-compatible endpoint models
+# only — USD per 1M tokens: (input, output, cached_input). When a model is served
+# behind a custom base_url, Hermes can't see the real model to price it
+# (resolve_billing_route → billing_mode "unknown"), so the /teams/{id}/costs
+# endpoint prices those token deltas with this map. NATIVE providers are priced
+# by Hermes instead (see estimate_cost_usd), so they do NOT belong here.
+# cached_input None = the endpoint reports no cached tier. Extend this map for
+# whatever models your custom endpoint serves; unknown models fall back to the
+# per-team token budget instead of a dollar one.
 # ---------------------------------------------------------------------------
 MODEL_PRICES_PER_MILLION: Dict[str, tuple] = {
-    "litellm-model":      (0.19, 0.51, None),
     "deepseek-v4-flash":  (0.19, 0.51, None),
     "kimi":               (0.19, 0.51, None),
     "gpt-5.4-mini":       (0.25, 2.00, 0.025),
@@ -407,9 +394,9 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int,
     shows 'n/a' rather than a wrong number). input_tokens must EXCLUDE cached
     reads (Hermes' canonical usage already subtracts them).
 
-    Proxy/custom models are opaque to Hermes — it sees only an alias like
-    "litellm-model" behind the endpoint — so they're priced from the swarm table
-    below. For a NATIVE provider (the `hermes setup` path) Hermes prices
+    Custom / OpenAI-compatible endpoint models are opaque to Hermes — it sees
+    only the alias served behind the base_url — so they're priced from the swarm
+    table below. For a NATIVE provider (the `hermes setup` path) Hermes prices
     precisely, so we DEFER to it: that's how a native-provider user sees correct
     costs without the swarm re-encoding every provider's price sheet (and without
     the table going stale as new models ship)."""

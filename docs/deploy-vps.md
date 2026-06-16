@@ -34,8 +34,9 @@ agents inside the container — so their terminal access is contained.
 git clone <repo> hermes-swarm && cd hermes-swarm
 cp .env.example .env
 # Edit .env:
-#   SWARM_LLM_BASE_URL + SWARM_LLM_API_KEY   → your LLM endpoint
 #   SWARM_API_KEY=<a long random string>     → REQUIRED when exposed
+# Then configure the provider with the Hermes wizard (persists on the volume):
+#   docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup
 ```
 
 By default `docker-compose.yml` binds `127.0.0.1:8000` only. Put a TLS proxy in
@@ -70,8 +71,8 @@ server {
 Then `docker compose up -d --build`. Open `https://swarm.example.com`, enter the
 API key when prompted.
 
-> **Firewall:** allow 80/443 only. Keep 8000 and your LLM proxy (e.g. 4000)
-> bound to localhost / the Docker network — never the public interface.
+> **Firewall:** allow 80/443 only. Keep 8000 (and any local LLM endpoint) bound
+> to localhost / the Docker network — never the public interface.
 
 ---
 
@@ -86,10 +87,11 @@ sudo -u hermes python3 -m venv /var/lib/hermes-swarm/venv
 sudo -u hermes /var/lib/hermes-swarm/venv/bin/pip install /path/to/hermes-swarm
 sudo -u hermes /var/lib/hermes-swarm/venv/bin/playwright install chromium
 
+# Configure the provider as the service user (writes ~/.hermes for that user;
+# the swarm adopts it). Custom / OpenAI-compatible endpoint → pick "custom".
+sudo -u hermes HOME=/var/lib/hermes-swarm /var/lib/hermes-swarm/venv/bin/hermes setup
+
 sudo tee /etc/hermes-swarm.env >/dev/null <<'EOF'
-SWARM_LLM_BASE_URL=https://openrouter.ai/api/v1
-SWARM_LLM_API_KEY=sk-...
-SWARM_DEFAULT_MODEL=openai/gpt-4o-mini
 SWARM_API_KEY=<a long random string>
 SWARM_DATA_DIR=/var/lib/hermes-swarm/data
 SWARM_LOG_FILE=/var/lib/hermes-swarm/swarm.log
@@ -143,7 +145,7 @@ finalizer drains agents and flushes browser cookies on `systemctl stop`.
 
 - [ ] `SWARM_API_KEY` set to a long random value
 - [ ] TLS reverse proxy in front; only 80/443 open to the world
-- [ ] 8000 + the LLM proxy bound to localhost / private network
+- [ ] 8000 (and any local LLM endpoint) bound to localhost / private network
 - [ ] Running in Docker, or as a dedicated non-root user via systemd
 - [ ] A per-team daily budget set
 - [ ] `SWARM_DATA_DIR` backed up; secrets files `chmod 600`

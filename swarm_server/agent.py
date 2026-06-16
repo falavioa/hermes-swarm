@@ -19,8 +19,6 @@ from swarm_server.config import (
     AUTONOMOUS_HEARTBEAT_SECONDS,
     DEFAULT_MAX_ITERATIONS,
     HEARTBEAT_BACKOFF_MAX_DOUBLINGS,
-    LITELLM_API_BASE,
-    LLM_API_KEY,
     LLM_ERROR_EMIT_THROTTLE_SECONDS,
     MAX_BATCH_SIZE,
     MAX_TASK_RETRIES,
@@ -692,8 +690,8 @@ class AgentDaemon:
                 cdp_url = team_browser_manager.ensure_team_browser(team_id)
 
                 # Per-agent model + sampling knobs (configurable from the UI;
-                # fall back to the proxy default / Hermes defaults when unset).
-                # Effective backend: per-agent override → swarm default → proxy.
+                # fall back to the resolved default when unset).
+                # Effective backend: per-agent override → swarm default → ~/.hermes.
                 from swarm_server.model_config import resolve_model
 
                 eff = resolve_model(self.cfg)
@@ -701,8 +699,9 @@ class AgentDaemon:
                 if not model:
                     raise RuntimeError(
                         f"No model configured for agent '{self.name}'. Run `hermes setup` "
-                        "to pick a provider + model (the swarm reads ~/.hermes), set a "
-                        "per-agent model in the dashboard, or set SWARM_LLM_* for a proxy."
+                        "to pick a provider + model (the swarm reads ~/.hermes), or set a "
+                        "per-agent model in the dashboard. For a custom / OpenAI-compatible "
+                        "endpoint, choose the 'custom' provider in `hermes setup`."
                     )
                 self._current_model = model
                 self._current_provider = eff["provider"] or ""

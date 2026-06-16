@@ -17,10 +17,10 @@ team that works on its own and asks you for help when it needs it.
    Hermes' built-in wizard. It supports 40+ providers (Anthropic, OpenAI,
    [OpenRouter](https://openrouter.ai), Groq, DeepSeek, local models, …): pick
    one, paste your key, choose a model. The swarm reads that config directly, so
-   there's nothing provider-specific to wire up separately. *(Prefer to send the
-   whole swarm through one [LiteLLM](https://github.com/BerriAI/litellm) /
-   OpenAI-compatible proxy instead? That path uses the `SWARM_LLM_*` env vars —
-   noted below.)*
+   there's nothing provider-specific to wire up separately. *(Using a
+   [LiteLLM](https://github.com/BerriAI/litellm) proxy or any OpenAI-compatible
+   endpoint? It's just another provider — pick **custom** in `hermes setup` and
+   enter its base URL + key.)*
 2. **Docker** *(recommended)* **or Python 3.11+**.
 
 You do **not** need to install Hermes (the agent runtime) separately — it's
@@ -30,63 +30,43 @@ pulled in automatically, and the `hermes` CLI comes with it.
 
 ## 2. Download & install
 
-### Quickest — one command
+Each path ends with the dashboard on **http://127.0.0.1:8000**.
 
-From a clone, `install.sh` inspects your machine and installs the best local
-way, then verifies it:
+### One line — macOS & Linux
 
 ```bash
-git clone <this-repo> hermes-swarm && cd hermes-swarm
-bash install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/CyberTron957/logios-orchestrator/main/install.sh)
 ```
 
-It adapts to your situation: **no Hermes yet** → it runs `hermes setup` for you;
-**already have `~/.hermes`** → it adopts your provider + keys and skips setup;
-**`SWARM_LLM_BASE_URL` set** → it uses your proxy and skips setup. Re-running is
-safe. Then `hermes-swarm init && hermes-swarm up`. Prefer Docker or a manual
-install? Read on.
+That clones the repo, sets up a local `.venv`, installs everything, fetches a
+browser, runs `hermes setup` if you don't already have a provider (40+ providers,
+incl. a custom / OpenAI-compatible endpoint), scaffolds a starter team, verifies
+with `hermes-swarm doctor`, and offers to start the dashboard. **Already have
+`~/.hermes`?** It adopts your provider + keys and skips setup. Safe to re-run.
+*(Flags: `--no-run`, `--no-setup`, `--no-browser`, `--yes`.)*
 
-### Option A — Docker (recommended)
+**Windows:** run that line in [WSL](https://learn.microsoft.com/windows/wsl/), or
+use Docker below. **Already cloned the repo?** `bash install.sh` does the same.
 
-The image bundles Python, Hermes, Chromium, and the dashboard, and runs the
-agents *inside* the container (which keeps their terminal access off your host).
+### Docker
+
+Runs the agents *inside* the container (keeping their terminal access off your
+host); data persists in the `swarm-data` volume.
 
 ```bash
 git clone <this-repo> hermes-swarm && cd hermes-swarm
+docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup
 docker compose up --build
 ```
 
-Configure your provider with Hermes' wizard (written to the shared config on the
-data volume, so it persists and becomes the swarm default):
+The middle step picks your provider with Hermes' wizard (written to the shared
+config on the volume, so it persists). Using a LiteLLM proxy or other
+OpenAI-compatible endpoint? Choose **custom** and enter its base URL + key (for
+one on your host, use `http://host.docker.internal:<port>`).
 
-```bash
-docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup
-```
-
-Open **http://127.0.0.1:8000**. Your data persists in the `swarm-data` Docker
-volume across restarts.
-
-> Prefer one OpenAI-compatible / LiteLLM proxy for the whole swarm (e.g. LiteLLM
-> on your host's :4000)? Skip `hermes setup`; instead `cp .env.example .env` and
-> set `SWARM_LLM_BASE_URL=http://host.docker.internal:4000/v1` +
-> `SWARM_LLM_API_KEY` + `SWARM_DEFAULT_MODEL`.
-
-### Option B — pip + virtualenv
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate     # Python 3.11+
-pip install .                                          # pulls hermes-agent (+ the hermes CLI) + deps
-playwright install chromium                            # for the browser tools
-
-hermes setup            # pick provider + key + model (saved in ~/.hermes)
-
-hermes-swarm doctor     # verify Hermes + your model + Chromium are all good
-hermes-swarm up         # serve the dashboard on http://127.0.0.1:8000
-```
-
-`hermes-swarm doctor` is the fastest way to diagnose a bad install — it checks
-that Hermes imports, that a model is configured (and reachable), and that
-Chromium is available, and tells you exactly what to fix.
+> `hermes-swarm doctor` is the fastest way to diagnose a bad install — it checks
+> that Hermes imports, a model is configured (and reachable), Chromium is
+> available, and the Hermes compat seams hold, telling you exactly what to fix.
 
 ---
 
@@ -265,7 +245,7 @@ logins persist across restarts too.
 |---|---|
 | Dashboard loads but nothing works / 401s | `SWARM_API_KEY` is set — enter it when prompted (or unset it for local use). |
 | "Hermes NOT importable" | `pip install hermes-agent`, or set `HERMES_AGENT_PATH`. Run `hermes-swarm doctor`. |
-| "LLM backend NOT reachable" | Check `SWARM_LLM_BASE_URL` / `SWARM_LLM_API_KEY`; make sure the endpoint serves `SWARM_DEFAULT_MODEL`. |
+| "LLM backend NOT reachable" | Re-run `hermes setup` (or `hermes-swarm doctor`) — check the provider key, and for a custom endpoint that its base URL serves the chosen model. |
 | Browser tools unavailable | `playwright install chromium` (or install Chrome). Everything else still works. |
 | Agent/Architect can't read a page or describes a URL wrongly | `web_extract` had no backend. Search works out of the box; for extract either configure a Hermes web backend (Firecrawl/Tavily/Exa) or install `pip install .[web]` (crawl4ai) for JS-heavy sites. A configured Hermes backend is always used as-is. |
 | Agents idle and doing nothing | Send a task, or mark the coordinator **autonomous** so it self-drives. |

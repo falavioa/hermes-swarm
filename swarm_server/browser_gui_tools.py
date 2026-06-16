@@ -518,12 +518,12 @@ _LOCATE_PROMPT = (
 
 def _resolve_vision_endpoint(caller: str) -> Dict[str, str]:
     """{base_url, api_key, model} for grounding calls — the agent's effective
-    backend (same proxy its own turns use). The model is the agent's MAIN model
-    when it can read images (probed once, cached), else the configured vision
-    model."""
-    from swarm_server.config import (
-        LITELLM_API_BASE, LLM_API_KEY, get_vision_model, resolve_screenshot_model,
-    )
+    backend. Vision grounding is a direct OpenAI-compatible call, so base_url is
+    present only when the agent's backend is a custom / OpenAI-compatible endpoint;
+    native providers have no base_url here and grounding is skipped (see callers).
+    The model is the agent's MAIN model when it can read images (probed once,
+    cached), else the configured vision model."""
+    from swarm_server.config import get_vision_model, resolve_screenshot_model
 
     base_url, api_key, main_model = "", "", ""
     try:
@@ -536,9 +536,7 @@ def _resolve_vision_endpoint(caller: str) -> Dict[str, str]:
         api_key = (eff.get("api_key") or "").strip()
         main_model = (eff.get("model") or "").strip()
     except Exception as e:
-        log.debug("vision endpoint resolve failed (%s); using proxy default", e)
-    base_url = base_url or LITELLM_API_BASE
-    api_key = api_key or LLM_API_KEY
+        log.debug("vision endpoint resolve failed (%s)", e)
     model = (resolve_screenshot_model(main_model, base_url, api_key)
              if main_model else get_vision_model())
     return {"base_url": base_url, "api_key": api_key, "model": model}
@@ -626,6 +624,15 @@ def _browser_locate_handler(args: dict, **kwargs) -> str:
     img_w, img_h = dims
 
     endpoint = _resolve_vision_endpoint(caller)
+    if not endpoint.get("base_url") or not endpoint.get("model"):
+        # Visual grounding is a direct OpenAI-compatible call; it needs a custom /
+        # OpenAI-compatible endpoint. On a native provider there's none — return a
+        # clear, actionable error instead of dialing a phantom endpoint.
+        return json.dumps({"success": False, "screenshot_path": str(actual),
+                           "error": "visual grounding (browser_locate) requires an "
+                                    "OpenAI-compatible model endpoint; the current "
+                                    "provider has none. Use coordinate-based browser "
+                                    "tools, or configure a custom endpoint via `hermes setup`."})
     prompt = _LOCATE_PROMPT.format(w=img_w, h=img_h, description=description[:300])
     try:
         reply = _call_vision_model(endpoint, prompt, actual.read_bytes())

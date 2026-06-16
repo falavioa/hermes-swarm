@@ -192,57 +192,56 @@ WORKSPACE_ROOT = DATA_ROOT / "teams"
 SERVER_HOST = os.environ.get("SWARM_HOST", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("SWARM_PORT", "8000"))
 
-# Optional single OpenAI-compatible / LiteLLM proxy for the WHOLE swarm. This is
-# opt-in: resolve_model() only routes through it when SWARM_LLM_BASE_URL is set
-# explicitly (there is no implicit localhost proxy — an unconfigured swarm asks
-# the operator to run `hermes setup`). The literal below is just the value used
-# IF the proxy is enabled without a custom URL; it is never dialed on its own.
-LITELLM_API_BASE = os.environ.get("SWARM_LLM_BASE_URL", "http://127.0.0.1:4000/v1")
-LLM_API_KEY = os.environ.get("SWARM_LLM_API_KEY", "sk-1234")
 SWEEP_INTERVAL_SECONDS = int(os.environ.get("SWARM_SWEEP_INTERVAL", "10"))
 
-# Model the backend serves by default. Per-agent overrides (cfg["model"]) fall
-# back to this. The fallback list is what the model dropdown shows if the
-# backend can't be queried.
-DEFAULT_MODEL = os.environ.get("SWARM_DEFAULT_MODEL", "litellm-model")
+# Default model NAME when nothing else is configured — EMPTY by default. The
+# swarm has no built-in model and no proxy: you choose a provider + model with
+# `hermes setup` (any of 40+ providers, incl. a custom / OpenAI-compatible
+# endpoint) or in the dashboard. resolve_model() layers per-agent override →
+# swarm default → ~/.hermes; an unconfigured swarm surfaces a "run hermes setup"
+# error rather than guessing. Optional operator override: SWARM_DEFAULT_MODEL.
+DEFAULT_MODEL = os.environ.get("SWARM_DEFAULT_MODEL", "")
+
+# Model-dropdown fallback when the configured backend can't be queried for its
+# served models (native providers expose no /models list). Empty = show only
+# what's actually resolvable; the UI also lets you type any model name.
 AVAILABLE_MODELS_FALLBACK = [m.strip() for m in os.environ.get(
-    "SWARM_FALLBACK_MODELS", "litellm-model,kimi").split(",") if m.strip()]
+    "SWARM_FALLBACK_MODELS", "").split(",") if m.strip()]
 
-# Model used ONLY for browser_vision (screenshot reading). The main agent model
-# may be text-only (DeepSeek/Kimi), so vision is pinned to a multimodal model the
-# proxy serves. gpt-5.4-nano is verified to accept image_url input via the proxy;
-# gpt-5.4-mini is not deployed on the backing Azure resource. Override with
-# SWARM_VISION_MODEL if the proxy's vision model changes.
-VISION_MODEL = os.environ.get("SWARM_VISION_MODEL", "gpt-5.4-nano")
+# Model used ONLY for browser_vision (screenshot reading) when the agent's main
+# model can't read images. Empty = let the resolved backend / Hermes handle
+# vision natively. Set SWARM_VISION_MODEL only for a text-only custom endpoint
+# that needs a separate multimodal model for grounding.
+VISION_MODEL = os.environ.get("SWARM_VISION_MODEL", "")
 
 
-def list_proxy_models(base_url: Optional[str] = None, api_key: Optional[str] = None) -> List[str]:
+def list_backend_models(base_url: Optional[str] = None, api_key: Optional[str] = None) -> List[str]:
     """Return the model ids an OpenAI-compatible backend serves (for the dropdown).
 
-    Queries {base_url}/models with the key. Defaults to the legacy proxy; callers
-    pass the resolved default backend so the dropdown reflects what's actually
-    configured. Falls back to AVAILABLE_MODELS_FALLBACK if unreachable so the UI
-    is never empty. DEFAULT_MODEL is always present and first.
+    Callers pass the resolved default backend, so this reflects whatever the
+    operator configured via `hermes setup` — but ONLY a custom / OpenAI-compatible
+    endpoint exposes a /models list. Native providers (anthropic/openai/…) don't,
+    so with no base_url (or on error) this returns AVAILABLE_MODELS_FALLBACK
+    (empty unless SWARM_FALLBACK_MODELS is set). The UI lets you type any model
+    name regardless.
     """
-    base = (base_url or LITELLM_API_BASE).rstrip("/")
-    key = api_key or LLM_API_KEY
+    base = (base_url or "").rstrip("/")
     models: List[str] = []
-    try:
-        import urllib.request
+    if base:
+        try:
+            import urllib.request
 
-        req = urllib.request.Request(
-            f"{base}/models", headers={"Authorization": f"Bearer {key}"},
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        models = [m.get("id") for m in data.get("data", []) if m.get("id")]
-    except Exception as e:
-        log.debug("list_proxy_models: query %s failed (%s) — using fallback", base, e)
+            req = urllib.request.Request(
+                f"{base}/models", headers={"Authorization": f"Bearer {api_key or ''}"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        except Exception as e:
+            log.debug("list_backend_models: query %s failed (%s) — using fallback", base, e)
     if not models:
         models = list(AVAILABLE_MODELS_FALLBACK)
-    if DEFAULT_MODEL in models:
-        models.remove(DEFAULT_MODEL)
-    return [DEFAULT_MODEL] + sorted(models)
+    return sorted(set(models))
 
 
 def list_toolsets() -> List[Dict[str, str]]:
@@ -659,7 +658,7 @@ def _ensure_project_dir(team_id: str, full_config: Optional[Dict[str, Any]] = No
 def write_agent_hermes_config(
     hermes_home: Path,
     cdp_url: Optional[str] = None,
-    model: str = DEFAULT_MODEL,
+    model: str = "",
     compression_threshold: Optional[float] = None,
     provider: str = "custom",
     base_url: Optional[str] = None,
@@ -691,11 +690,12 @@ def write_agent_hermes_config(
         except Exception as e:
             log.warning("Could not parse existing %s (%s) — rewriting", cfg_path, e)
 
-    # ROUTE DECIDES HOW MUCH WE PIN. An OpenAI-compatible endpoint (LiteLLM proxy
-    # or any custom base_url) HIDES the real model from Hermes — it sees only an
-    # alias like "litellm-model" — so we must pin context_length, the auxiliary
-    # model, and vision ourselves (Hermes would otherwise guess a 256K window and
-    # resolve aux to an unauthenticated provider / phantom "gpt-4o-mini").
+    # ROUTE DECIDES HOW MUCH WE PIN. A custom / OpenAI-compatible endpoint (any
+    # base_url, configured via `hermes setup`'s custom provider) HIDES the real
+    # model from Hermes — it sees only the alias behind the endpoint — so we must
+    # pin context_length, the auxiliary model, and vision ourselves (Hermes would
+    # otherwise guess a 256K window and resolve aux to an unauthenticated provider
+    # / phantom "gpt-4o-mini").
     #
     # A NATIVE provider (no base_url — e.g. anthropic/openai via `hermes setup`)
     # is the opposite: Hermes KNOWS the model and resolves its real context window
@@ -704,8 +704,8 @@ def write_agent_hermes_config(
     # Pinning there is actively harmful (caps a 1M-context model at 256K; forces
     # the full main model to do title-gen/compaction) AND freezes values Hermes
     # keeps fresh as it ships new models. So on the native route we DEFER.
-    eff_base = base_url if base_url is not None else LITELLM_API_BASE
-    eff_key = api_key if api_key is not None else LLM_API_KEY
+    eff_base = base_url or ""
+    eff_key = api_key or ""
     eff_provider = provider or "custom"
     on_openai_compatible = bool(eff_base)
 
@@ -1539,9 +1539,9 @@ def get_vision_model() -> str:
     return VISION_MODEL
 
 
-# Vision-capability probe. Proxy metadata can't be trusted here (LiteLLM's
-# /model/info carries no supports_vision for generic aliases like
-# "litellm-model"), and a gateway may silently ACCEPT image parts a text-only
+# Vision-capability probe. A custom endpoint's metadata can't be trusted here
+# (an OpenAI-compatible gateway's /model/info often carries no supports_vision
+# for generic aliases), and it may silently ACCEPT image parts a text-only
 # model never sees — so capability is established empirically: send a solid
 # red PNG and require the model to name the color. Verdicts are cached for
 # the process lifetime (capability doesn't change under a fixed model name;

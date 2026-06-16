@@ -26,12 +26,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 from swarm_server.config import (
-    DEFAULT_MODEL,
     DIGEST_INPUT_CHAR_CAP,
     DIGEST_MAX_AGE_SECONDS,
     DIGEST_MIN_NEW_TOKENS,
-    LITELLM_API_BASE,
-    LLM_API_KEY,
     get_global_settings,
 )
 from swarm_server.monitoring import monitor_db
@@ -64,8 +61,11 @@ _SYSTEM_PROMPT = (
 
 def _resolve_summary_target() -> Dict[str, str]:
     """Effective {model, base_url, api_key} for the digest model. Model is the
-    UI-configurable global setting (falling back to the swarm default model);
-    the endpoint is the swarm-wide LLM endpoint the agents already use."""
+    UI-configurable global setting (falling back to the swarm default model); the
+    endpoint is the resolved default backend. The digest is a direct
+    OpenAI-compatible call, so it only runs when the default model is a custom /
+    OpenAI-compatible endpoint (base_url present); native providers (anthropic/…)
+    have no base_url here and the digest is skipped — see _call_llm."""
     settings = get_global_settings()
     try:
         from swarm_server.model_config import get_default_model
@@ -73,9 +73,9 @@ def _resolve_summary_target() -> Dict[str, str]:
         dm = get_default_model() or {}
     except Exception:
         dm = {}
-    model = (settings.get("summary_model") or "").strip() or dm.get("model") or DEFAULT_MODEL
-    base_url = (dm.get("base_url") or "").strip() or LITELLM_API_BASE
-    api_key = (dm.get("api_key") or "").strip() or LLM_API_KEY
+    model = (settings.get("summary_model") or "").strip() or dm.get("model") or ""
+    base_url = (dm.get("base_url") or "").strip()
+    api_key = (dm.get("api_key") or "").strip()
     return {"model": model, "base_url": base_url, "api_key": api_key}
 
 
@@ -150,6 +150,12 @@ def _parse_summary(raw: str) -> Optional[dict]:
 
 def _call_llm(target: Dict[str, str], transcript: str, prior: str,
               agent_name: str) -> Optional[str]:
+    if not target.get("base_url") or not target.get("model"):
+        # The monitoring digest is a direct OpenAI-compatible call; it needs a
+        # custom/OpenAI-compatible endpoint. Native providers have no base_url —
+        # skip quietly rather than dial a phantom endpoint every sweep.
+        log.debug("[Digest] no OpenAI-compatible endpoint for %s — skipping digest", agent_name)
+        return None
     try:
         from openai import OpenAI
     except Exception as e:  # pragma: no cover
