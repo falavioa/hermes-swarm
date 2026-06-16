@@ -198,8 +198,15 @@ if [ "$NO_BROWSER" -eq 0 ]; then
   if "$PY" -c 'import sys; from swarm_server.browser_pool import _find_browser; sys.exit(0 if _find_browser() else 1)' 2>/dev/null; then
     info "Found a usable Chrome/Chromium — skipping the download."
   else
+    # The `playwright` Python package isn't always pulled in by hermes-agent[all];
+    # make sure it's importable before we ask it to fetch a browser.
+    if ! "$PY" -c 'import playwright' 2>/dev/null; then
+      info "Installing the playwright package…"
+      "$PY" -m pip install --quiet playwright || warn "couldn't install playwright."
+    fi
     info "No system Chrome found — downloading Playwright Chromium…"
-    "$PY" -m playwright install chromium || warn "Chromium install failed; browser tools will be unavailable."
+    "$PY" -m playwright install chromium \
+      || warn "Chromium install failed; browser tools will be unavailable (everything else works)."
   fi
 else
   warn "--no-browser: skipping Chromium (browser tools will be unavailable)."
