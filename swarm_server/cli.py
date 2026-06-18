@@ -2,6 +2,10 @@
 
 Subcommands:
   hermes-swarm up        Run the swarm server + dashboard (default)
+  hermes-swarm down      Stop a server started with `up` (incl. detached)
+  hermes-swarm status    Is the server running? show URL + health
+  hermes-swarm setup     Full interactive provider/tool wizard (`hermes setup`)
+  hermes-swarm set-model Set provider/model non-interactively (scriptable)
   hermes-swarm init      Scaffold a starter team + coordinator agent
   hermes-swarm doctor    Check Hermes, the model backend, and Chromium
 
@@ -12,6 +16,57 @@ import argparse
 import logging
 import os
 import sys
+
+
+# ---------------------------------------------------------------------------
+# Running-server tracking (pidfile) so `down`/`status` work for a detached `up`.
+# ---------------------------------------------------------------------------
+def _pidfile_path():
+    from swarm_server.config import DATA_ROOT
+    return DATA_ROOT / "swarm.pid"
+
+
+def _write_pidfile() -> None:
+    try:
+        p = _pidfile_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def _clear_pidfile() -> None:
+    try:
+        _pidfile_path().unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def _running_pid():
+    """PID of the server per the pidfile if that process is alive, else None."""
+    try:
+        pid = int(_pidfile_path().read_text().strip())
+    except Exception:
+        return None
+    try:
+        os.kill(pid, 0)            # signal 0 = liveness probe
+    except OSError:
+        return None                # stale pidfile (process gone)
+    return pid
+
+
+def _probe_health(host: str, port: int, timeout: float = 1.5) -> bool:
+    """True if GET /health succeeds. 0.0.0.0 means 'all interfaces' — dial loopback."""
+    import urllib.request
+
+    h = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
+    try:
+        with urllib.request.urlopen(f"http://{h}:{port}/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
 
 
 def _setup_logging() -> None:
@@ -40,15 +95,108 @@ def cmd_up(args) -> int:
             log.warning("  Model:        none configured — run `hermes setup`")
     except Exception as e:  # never let a config probe block server start
         log.debug("startup model resolve failed: %s", e)
+    log.info("  Stop it with:  hermes-swarm down   (status: hermes-swarm status)")
     log.info("=" * 60)
-    uvicorn.run(
-        "swarm_server.server:app",
-        host=SERVER_HOST,
-        port=SERVER_PORT,
-        log_level="info",
-        reload=False,
-    )
+    _write_pidfile()              # so `down`/`status` find a detached server
+    try:
+        uvicorn.run(
+            "swarm_server.server:app",
+            host=SERVER_HOST,
+            port=SERVER_PORT,
+            log_level="info",
+            reload=False,
+        )
+    finally:
+        _clear_pidfile()
     return 0
+
+
+def cmd_down(args) -> int:
+    """Stop a server started with `up` (foreground or detached)."""
+    import signal
+    import time
+
+    from swarm_server.config import SERVER_HOST, SERVER_PORT
+
+    pid = _running_pid()
+    if not pid:
+        if _probe_health(SERVER_HOST, SERVER_PORT):
+            print("A server is responding but no pidfile was found "
+                  "(started outside this data dir).")
+            print("   → stop it where it runs (Ctrl-C), or:  pkill -f 'hermes-swarm up'")
+            return 1
+        print("○ Not running — nothing to stop.")
+        return 0
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        print(f"Couldn't signal pid {pid}: {e}")
+        _clear_pidfile()
+        return 1
+    # Give uvicorn a few seconds for a graceful shutdown, then force it.
+    for _ in range(50):
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    _clear_pidfile()
+    print(f"■ Stopped the swarm server (pid {pid}).")
+    return 0
+
+
+def cmd_status(args) -> int:
+    """Report whether the server is up, its URL, and health."""
+    from swarm_server.config import SERVER_HOST, SERVER_PORT
+
+    pid = _running_pid()
+    healthy = _probe_health(SERVER_HOST, SERVER_PORT)
+    url = f"http://{SERVER_HOST}:{SERVER_PORT}"
+    if pid or healthy:
+        where = f"pid {pid}" if pid else "detected on port (no pidfile)"
+        print(f"● running ({where})")
+        print(f"   Dashboard:  {url}/")
+        print(f"   Health:     {'ok' if healthy else 'starting… (not responding yet)'}")
+        print(f"   Stop it:    hermes-swarm down")
+        return 0
+    print("○ not running")
+    print("   Start it:   hermes-swarm up")
+    return 1
+
+
+def cmd_setup(args) -> int:
+    """Launch the FULL interactive Hermes wizard against the swarm's shared config.
+
+    A superset of ``set-model``: besides the provider + model, ``hermes setup``
+    configures web-search / vision / browser tool providers, memory, reasoning
+    effort, credential rotation, and more. It writes to the same shared home
+    (``data/.hermes-shared``) that the swarm reads as its default, so settings
+    apply to every agent. Use this when you want more than just the model.
+    """
+    import subprocess
+
+    from swarm_server.model_config import SHARED_HERMES_HOME
+
+    SHARED_HERMES_HOME.mkdir(parents=True, exist_ok=True)
+    hermes = os.path.join(os.path.dirname(sys.executable), "hermes")
+    if not os.path.exists(hermes):
+        hermes = "hermes"                      # fall back to PATH
+    # Hermes reads HERMES_HOME from the environment (hermes_constants.get_hermes_home).
+    env = dict(os.environ, HERMES_HOME=str(SHARED_HERMES_HOME))
+    print(f"Launching `hermes setup` against the swarm config "
+          f"({SHARED_HERMES_HOME}) — providers, web/vision/browser tools, memory…\n")
+    try:
+        return subprocess.call([hermes, "setup", *getattr(args, "rest", [])], env=env)
+    except FileNotFoundError:
+        print("error: the `hermes` CLI isn't on PATH — install hermes-agent.",
+              file=sys.stderr)
+        return 1
 
 
 def cmd_doctor(args) -> int:
@@ -250,6 +398,18 @@ def main(argv=None) -> int:
 
     up = sub.add_parser("up", help="Run the swarm server + dashboard")
     up.set_defaults(func=cmd_up)
+
+    down = sub.add_parser("down", help="Stop a server started with `up` (incl. detached)")
+    down.set_defaults(func=cmd_down)
+
+    st = sub.add_parser("status", help="Is the server running? show URL + health")
+    st.set_defaults(func=cmd_status)
+
+    setup = sub.add_parser("setup",
+        help="Full interactive provider/tool wizard (web search, vision, browser, memory…)")
+    setup.add_argument("rest", nargs=argparse.REMAINDER,
+        help="extra args passed through to `hermes setup`")
+    setup.set_defaults(func=cmd_setup)
 
     doc = sub.add_parser("doctor", help="Check Hermes, model backend, and Chromium")
     doc.set_defaults(func=cmd_doctor)

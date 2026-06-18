@@ -2,7 +2,12 @@ services:
   swarm:
     build: .
     image: hermes-swarm:latest
-    env_file: .env
+    env_file:
+      # Optional: provider keys / SWARM_API_KEY etc. A fresh clone has no .env
+      # (it's gitignored) — `required: false` lets `docker compose up` work
+      # without one. Copy .env.example → .env to use it.
+      - path: .env
+        required: false
     environment:
       # Set by the image, repeated here for clarity / override.
       SWARM_HOST: "0.0.0.0"
@@ -14,6 +19,10 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - swarm-data:/data
+      # Adopt an existing host Hermes setup (provider + tool API keys) without
+      # reconfiguring: uncomment to mount it read-only. The container reads
+      # ~/.hermes as a fallback and imports its .env secrets on startup.
+      # - ${HOME}/.hermes:/root/.hermes:ro
     restart: unless-stopped
     # If you configured a custom / OpenAI-compatible endpoint that runs on the
     # HOST (via `hermes setup`), reach it from the container as

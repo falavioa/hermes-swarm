@@ -802,16 +802,23 @@ self-hosted multi-agent server with a real-time dashboard. Please:
 
 1. Check prerequisites first: Python 3.11+ (or Docker). If something is missing,
    tell me before installing any system packages.
-2. Clone the repo into ./hermes-swarm and run its installer: `bash install.sh`.
+2. Clone the repo into ./hermes-swarm and run its installer: `bash install.sh --no-run`.
    It creates a .venv, installs dependencies, and installs Chromium for the
    browser tools. (Pass `--no-browser` if Chromium can't install — everything
    else still works.)
-3. The installer runs `hermes setup` to pick an LLM provider + API key — PAUSE
-   and ask me which provider to use and for the key. Do not guess or hardcode one.
-4. Verify with `hermes-swarm doctor` and fix anything it flags.
-5. Scaffold a starter team and start the server: `hermes-swarm init && hermes-swarm up`.
-6. Confirm the dashboard is live at http://127.0.0.1:8000, then tell me how to
-   open it and build my first team with the Architect.
+3. Check whether a provider is already configured: `.venv/bin/hermes-swarm doctor`.
+   If it already shows a model (e.g. an existing ~/.hermes setup), ADOPT IT —
+   don't ask me for keys. Otherwise PAUSE and ask me which provider + key to use
+   (don't guess), then set it: `.venv/bin/hermes-swarm set-model --provider <p>
+   --model <m> [--base-url <url>] --api-key <key>`. Tell me I can configure
+   web-search / vision / browser / memory tools anytime with
+   `.venv/bin/hermes-swarm setup`.
+4. Verify with `.venv/bin/hermes-swarm doctor` and fix anything it flags.
+5. Scaffold a team and start it detached:
+   `.venv/bin/hermes-swarm init && nohup .venv/bin/hermes-swarm up > swarm.log 2>&1 &`.
+6. Confirm the dashboard is live at http://127.0.0.1:8000 (`hermes-swarm status`),
+   then tell me how to open it, build my first team with the Architect, and manage
+   the server (`hermes-swarm status` / `hermes-swarm down` / `hermes-swarm setup`).
 
 Keep my API key local. Don't commit anything or send data anywhere.</script>
 <script type="text/plain" id="promptVps">Deploy Hermes Swarm on this VPS, exposed safely over HTTPS.
@@ -998,7 +1005,7 @@ file that could be committed.</script>
     docker: [
       {t:'cm', x:'# everything bundled — python, hermes, chromium'},
       {t:'cmd', x:'git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm'},
-      {t:'cmd', x:'docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup'},
+      {t:'cmd', x:'docker compose run --rm swarm hermes-swarm setup'},
       {t:'cmd', x:'docker compose up --build'},
       {t:'ok',  x:'✓ dashboard → http://127.0.0.1:8000'}
     ],
@@ -1011,7 +1018,7 @@ file that could be committed.</script>
   };
   var COPY = {
     oneline: ONELINER,
-    docker:  'git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm && docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup && docker compose up --build',
+    docker:  'git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm && docker compose run --rm swarm hermes-swarm setup && docker compose up --build',
     clone:   'git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm && bash install.sh'
   };
   var termBody = document.getElementById('termBody');

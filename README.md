@@ -29,27 +29,33 @@ Install and run Hermes Swarm on this machine for me.
 Hermes Swarm (https://github.com/CyberTron957/hermes-mission-control) is a
 self-hosted multi-agent server with a real-time dashboard.
 
-First ask me for my LLM provider details, then proceed unattended:
-  - provider (e.g. openai, anthropic, or "custom" for an OpenAI-compatible / proxy endpoint)
-  - model name
-  - API key
-  - base URL (only for custom/proxy, e.g. http://localhost:4000/v1)
-
-Then:
 1. Check Python 3.11+ (or Docker). If missing, tell me before installing system packages.
 2. If ./hermes-swarm doesn't exist, clone the repo there. Run the installer
    non-interactively: `bash install.sh --no-run`. It auto-skips the interactive
    wizard when there's no TTY, so it won't hang. (Add `--no-browser` only if the
    Chromium download fails — everything else still works.)
-3. Configure my provider with the supported NON-interactive command (do NOT run
-   the interactive `hermes setup`, and do NOT edit Python internals):
+3. Check whether a provider is already configured — run `.venv/bin/hermes-swarm doctor`.
+   If it already shows a model (e.g. an existing `~/.hermes` setup), ADOPT IT —
+   don't ask me for keys, the swarm reuses it automatically. Skip to step 5.
+4. Only if NO provider is configured, ask me for:
+     - provider (e.g. openai, anthropic, or "custom" for an OpenAI-compatible / proxy endpoint)
+     - model name, API key, and base URL (base URL only for custom/proxy, e.g. http://localhost:4000/v1)
+   Then set it with the supported NON-interactive command (do NOT edit Python internals):
      .venv/bin/hermes-swarm set-model --provider <p> --model <m> [--base-url <url>] --api-key <key>
-4. Verify: `.venv/bin/hermes-swarm doctor` (a "backend not reachable" warning is
+   Then tell me that `set-model` only sets the model — for web-search, vision,
+   browser providers, memory, and reasoning-effort customization I can run the
+   full wizard myself anytime: `.venv/bin/hermes-swarm setup`. Offer to run it.
+5. Verify: `.venv/bin/hermes-swarm doctor` (a "backend not reachable" warning is
    fine if my model server isn't running yet).
-5. Scaffold a team and start the server detached/in the background:
+6. Scaffold a team and start the server detached/in the background:
      .venv/bin/hermes-swarm init
-     .venv/bin/hermes-swarm up      # run in the background; confirm http://127.0.0.1:8000 responds
-6. Tell me how to open the dashboard and build my first team with the Architect.
+     nohup .venv/bin/hermes-swarm up > swarm.log 2>&1 &   # detached
+   Confirm http://127.0.0.1:8000 responds (`.venv/bin/hermes-swarm status`).
+7. Tell me how to manage it and build my first team:
+     - open the dashboard at http://127.0.0.1:8000 and use the Architect
+     - check status:  .venv/bin/hermes-swarm status
+     - stop it:       .venv/bin/hermes-swarm down
+     - customize more: .venv/bin/hermes-swarm setup
 
 Keep my API key local — don't commit it or send it anywhere.
 ```
@@ -102,8 +108,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/CyberTron957/hermes-mission-
 ```bash
 # Docker - bundles Python, Hermes, Chromium
 git clone https://github.com/CyberTron957/hermes-mission-control hermes-swarm && cd hermes-swarm
-docker compose run --rm -e HERMES_HOME=/data/.hermes-shared swarm hermes setup
+docker compose run --rm swarm hermes-swarm setup   # full wizard → shared config on the volume
 docker compose up --build
+# manage it:  docker compose ps   ·   docker compose logs -f   ·   docker compose down
+# Already configured Hermes on the host? Uncomment the ~/.hermes mount in
+# docker-compose.yml to adopt that provider + tool keys automatically.
 ```
 or
 ```bash
@@ -135,10 +144,13 @@ bash install.sh
 
 ## How it works
 
-1. **Configure a provider** - one `hermes setup` wizard: pick from 40+ providers,
-   paste a key, choose a model. *(Headless / scripting? Set it non-interactively
-   with `hermes-swarm set-model --provider … --model … [--base-url …] --api-key …`,
-   or the `SWARM_SETUP_*` env vars the installer reads.)*
+1. **Configure a provider** - one `hermes-swarm setup` wizard: pick from 40+
+   providers, paste a key, choose a model, and (optionally) configure web-search,
+   vision, browser, and memory tools — all written to the swarm's shared config.
+   *(Headless / scripting? Set just the model non-interactively with
+   `hermes-swarm set-model --provider … --model … [--base-url …] --api-key …`, or
+   the `SWARM_SETUP_*` env vars the installer reads. An existing `~/.hermes` setup
+   is detected and adopted automatically — no reconfiguration needed.)*
 2. **Build a team** - tell the Architect what you want; it proposes the agents,
    their roles, and who talks to whom, then builds it on your approval.
 3. **Deploy & steer** - hand the team a mission and watch it run from the console.

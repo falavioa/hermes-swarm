@@ -226,7 +226,11 @@ if [ -n "${SWARM_SETUP_MODEL:-}" ]; then
     ${SWARM_SETUP_API_KEY:+--api-key "$SWARM_SETUP_API_KEY"} \
     || warn "set-model failed — configure later with: $VENV/bin/hermes-swarm set-model --help"
 elif is_configured; then
-  info "A provider is already configured (your ~/.hermes or a swarm default) — adopting it. Nothing to do."
+  # Detect WHICH home already has a model so the message is honest about what we
+  # adopted (a personal `hermes setup` in ~/.hermes, or a prior swarm default).
+  _src="$("$PY" -c 'from swarm_server.model_config import get_default_model, detect_global_hermes_model as g; import sys; sys.stdout.write("swarm default (data/.hermes-shared)" if get_default_model().get("model") else ("your existing ~/.hermes setup" if g().get("model") else "?"))' 2>/dev/null || echo '?')"
+  info "Provider already configured — adopting $_src. Nothing to do."
+  info "(Reconfigure or add tool keys anytime with: $VENV/bin/hermes-swarm setup)"
 elif [ "$NO_SETUP" -eq 1 ] || [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
   warn "No provider configured. Set one non-interactively:  $VENV/bin/hermes-swarm set-model --model <m> [--base-url <url>] [--api-key <k>]"
   warn "…or run the interactive wizard:  $VENV/bin/hermes setup"
@@ -244,10 +248,16 @@ step "Scaffolding a starter team"
 "$VENV/bin/hermes-swarm" init || warn "init skipped (see above)."
 
 # ---- done: start now, or print the one command to do it -------------------
-# Absolute path so it works from any shell (e.g. after a web-bootstrap clone).
+# Absolute paths so they work from any shell (e.g. after a web-bootstrap clone).
 START_CMD="$VENV/bin/hermes-swarm up"
 step "Done — your swarm is installed in $PWD"
-info "Start the dashboard:  $START_CMD   → http://127.0.0.1:8000"
+info "Manage the server (run these from anywhere):"
+info "  start:    $START_CMD            → http://127.0.0.1:8000"
+info "  start bg: nohup $START_CMD > swarm.log 2>&1 &   (detached)"
+info "  status:   $VENV/bin/hermes-swarm status"
+info "  stop:     $VENV/bin/hermes-swarm down"
+info "Customize providers / web-search / vision / browser tools / memory:"
+info "  $VENV/bin/hermes-swarm setup     (full interactive wizard)"
 if [ "$NO_RUN" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
   printf '\n    Start it now? [Y/n] '
   read -r _ans
