@@ -1970,6 +1970,48 @@ async def get_human_inbox():
     })
 
 
+# ---------------------------------------------------------------------------
+# Docker Containers Monitoring
+# ---------------------------------------------------------------------------
+@app.get("/api/docker/containers")
+async def list_docker_containers():
+    """List all Docker containers on the host (requires /var/run/docker.sock)."""
+    try:
+        from docker import DockerClient
+        from docker.errors import DockerException
+
+        client = DockerClient.from_env()
+        containers = client.containers.list(all=True)
+        result = []
+        for c in containers:
+            try:
+                image = c.image.tags[0] if c.image.tags else c.image.short_id
+            except Exception:
+                image = "unknown"
+            ports = []
+            if c.ports:
+                for container_port, mappings in c.ports.items():
+                    if mappings:
+                        for m in mappings:
+                            host_port = m.get("HostPort", "")
+                            if host_port:
+                                ports.append(f"{host_port}→{container_port}")
+            result.append({
+                "name": c.name,
+                "image": image,
+                "status": c.status,
+                "state": c.attrs.get("State", {}).get("Status", "unknown"),
+                "created": c.attrs.get("Created", ""),
+                "ports": ports,
+                "uptime": c.attrs.get("State", {}).get("StartedAt", ""),
+            })
+        return {"containers": result}
+    except ImportError:
+        return {"error": "Docker SDK not installed", "containers": []}
+    except DockerException as e:
+        return {"error": str(e), "containers": []}
+
+
 @app.post("/inbox/{agent_name}/respond")
 async def respond_to_human_question(agent_name: str, request: Request):
     from swarm_server.tools import _pending_human_questions, _pending_lock

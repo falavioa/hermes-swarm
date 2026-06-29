@@ -418,6 +418,28 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .inbox-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 140; display: none; }
 .inbox-overlay.open { display: block; animation: fadeIn 0.2s ease; }
 
+/* ===== CONTAINERS PANEL ===== */
+.containers-panel {
+    position: fixed; top: 0; right: -560px; width: 540px; max-width: 92vw;
+    bottom: 0; background: var(--bg-raised);
+    border-left: 1px solid var(--border-strong); z-index: 150;
+    transition: right 0.32s cubic-bezier(.2,.8,.2,1);
+    display: flex; flex-direction: column;
+    box-shadow: -30px 0 80px -40px rgba(0,0,0,0.9);
+}
+.containers-panel.open { right: 0; }
+.ctn-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ctn-table th { text-align: left; padding: 8px 10px; color: var(--text-muted); font-weight: 500; border-bottom: 1px solid var(--border); }
+.ctn-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.ctn-name { font-weight: 600; color: var(--text); }
+.ctn-image { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+.ctn-status { display: inline-flex; align-items: center; gap: 5px; }
+.ctn-status .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.ctn-status .dot.running { background: var(--idle); }
+.ctn-status .dot.exited { background: var(--danger); }
+.ctn-status .dot.paused { background: var(--busy); }
+.ctn-ports { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
+
 /* ===== EMBEDDED BROWSER PANEL (human takeover) ===== */
 .browser-panel { position: fixed; top: 0; right: -1000px; width: 960px; max-width: 98vw; bottom: 0; background: var(--bg-raised); border-left: 1px solid var(--border-strong); z-index: 160; transition: right 0.32s cubic-bezier(.2,.8,.2,1); display: flex; flex-direction: column; box-shadow: -30px 0 80px -40px rgba(0,0,0,0.9); }
 .browser-panel.open { right: 0; }
@@ -642,6 +664,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
             ">0</span>
         </button>
         <button class="btn btn-sm btn-secondary" onclick="showModelSettings(false)" aria-label="Model settings" title="Default model for all agents"><span data-icon="cpu" data-icon-size="13"></span> <span class="tb-label">Model</span></button>
+        <button class="btn btn-sm btn-secondary" onclick="toggleContainers()" aria-label="Docker containers" title="Monitor Docker containers"><span data-icon="box" data-icon-size="13"></span> <span class="tb-label">Containers</span></button>
         <button class="btn btn-sm btn-secondary" onclick="openBrowserPanel(currentTeam)" aria-label="Open team browser" title="Watch & control this team's browser live"><span data-icon="globe" data-icon-size="13"></span> <span class="tb-label">Browser</span></button>
         <button id="team-pause-btn" class="btn btn-sm btn-secondary" data-mode="pause" onclick="toggleTeamPause()" style="display:none" aria-label="Pause team" title="Freeze every agent on this team"><span data-icon="clock" data-icon-size="13"></span> <span class="tb-label">Pause team</span></button>
         <label for="team-select" class="sr-only">Team</label>
@@ -930,6 +953,21 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
         <canvas id="browser-canvas" width="1280" height="800" tabindex="0"></canvas>
     </div>
     <div class="browser-status" id="browser-status"><span><span class="dot"></span><span id="browser-status-text">Disconnected</span></span><span id="browser-hint">Click the page, then type. Scroll to pan.</span></div>
+</div>
+
+<!-- Containers Panel -->
+<div class="inbox-overlay" id="containers-overlay" onclick="toggleContainers()"></div>
+<div class="containers-panel" id="containers-panel" role="complementary" aria-label="Docker containers">
+    <div class="inbox-header">
+        <h3><span data-icon="box" data-icon-size="14"></span> Docker Containers</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn btn-sm btn-secondary" onclick="loadContainers()" title="Refresh container list"><span data-icon="history" data-icon-size="12"></span></button>
+            <button class="btn btn-sm btn-secondary" onclick="toggleContainers()">Close</button>
+        </div>
+    </div>
+    <div class="inbox-body" id="containers-body">
+        <div class="empty-state"><div class="empty-state-icon"><span data-icon="box" data-icon-size="26"></span></div><div>Loading containers...</div></div>
+    </div>
 </div>
 
 <!-- Respond Modal -->
@@ -2775,6 +2813,7 @@ const ICONS = {
     'pause': '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
     'square': '<rect x="5" y="5" width="14" height="14" rx="2"/>',
     'ban': '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+    'box': '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>',
     'plus': '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
 };
 
@@ -3267,6 +3306,51 @@ function dismissUpdate(info) {
     });
     bumpInboxBadge(1);
     if (document.getElementById('inbox-panel')?.classList.contains('open')) renderInbox();
+}
+
+/* ===== DOCKER CONTAINERS ===== */
+async function toggleContainers() {
+    document.getElementById('containers-panel').classList.toggle('open');
+    document.getElementById('containers-overlay').classList.toggle('open');
+    if (document.getElementById('containers-panel').classList.contains('open')) {
+        await loadContainers();
+    }
+}
+
+async function loadContainers() {
+    const body = document.getElementById('containers-body');
+    body.innerHTML = '<div class=\"empty-state\"><div class=\"empty-state-icon\">' + icon('box', 26) + '</div><div>Loading containers...</div></div>';
+    try {
+        const data = await fetch('/api/docker/containers').then(r => r.json());
+        renderContainers(data);
+    } catch (e) {
+        body.innerHTML = '<div class=\"empty-state\"><div class=\"empty-state-icon\">' + icon('alert', 26) + '</div><div>Failed to load containers</div></div>';
+    }
+}
+
+function renderContainers(data) {
+    const body = document.getElementById('containers-body');
+    if (data.error) {
+        body.innerHTML = '<div class=\"empty-state\"><div class=\"empty-state-icon\">' + icon('alert', 26) + '</div><div>' + esc(data.error) + '</div></div>';
+        return;
+    }
+    const containers = data.containers || [];
+    if (!containers.length) {
+        body.innerHTML = '<div class=\"empty-state\"><div class=\"empty-state-icon\">' + icon('box', 26) + '</div><div>No containers found</div></div>';
+        return;
+    }
+    let html = '<table class=\"ctn-table\"><thead><tr><th>Name</th><th>Image</th><th>Status</th><th>Ports</th></tr></thead><tbody>';
+    for (const c of containers) {
+        const dotClass = c.status === 'running' ? 'running' : c.status === 'exited' || c.status === 'dead' ? 'exited' : 'paused';
+        html += '<tr>' +
+            '<td class=\"ctn-name\">' + esc(c.name) + '</td>' +
+            '<td class=\"ctn-image\">' + esc(c.image) + '</td>' +
+            '<td><span class=\"ctn-status\"><span class=\"dot ' + dotClass + '\"></span>' + esc(c.status) + '</span></td>' +
+            '<td class=\"ctn-ports\">' + esc((c.ports || []).join(', ')) + '</td>' +
+            '</tr>';
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
 }
 
 function toggleInbox() {

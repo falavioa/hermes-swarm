@@ -8,6 +8,9 @@ pydantic
 aiosqlite
 ddgs
 
+# Docker SDK — usado pela rota /api/docker/containers para monitoramento
+docker>=7.1.0
+
 # The agent runtime each swarm member runs. Installed from PyPI; a source
 # checkout on PYTHONPATH (or HERMES_AGENT_PATH) takes precedence if present.
 hermes-agent[all]>=0.15.2
