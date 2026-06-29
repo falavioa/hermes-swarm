@@ -21,10 +21,8 @@ services:
       - swarm-data:/data
       # Docker socket — permite que o Swarm monitore containers do host
       - /var/run/docker.sock:/var/run/docker.sock
-      # Adopt an existing host Hermes setup (provider + tool API keys) without
-      # reconfiguring: uncomment to mount it read-only. The container reads
-      # ~/.hermes as a fallback and imports its .env secrets on startup.
-      # - ${HOME}/.hermes:/root/.hermes:ro
+      # Monta ~/.hermes do host — o container importa secrets na inicialização
+      - ${HOME}/.hermes:/root/.hermes:ro
     restart: unless-stopped
     # If you configured a custom / OpenAI-compatible endpoint that runs on the
     # HOST (via `hermes setup`), reach it from the container as
